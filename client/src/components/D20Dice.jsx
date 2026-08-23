@@ -22,32 +22,35 @@ function playDiceRollSound() {
   } catch (_) {}
 }
 
-/**
- * D20 Icosahedron rendered as SVG top-down view with 3D rotating canvas animation.
- * Uses canvas-based icosahedron projection for real 3D look.
- */
-function drawIcosahedron(canvas, rotX, rotY, roll, isNat20, isNat1) {
+// D20 face assignment — each of the 20 faces has a fixed number
+const FACE_NUMBERS = [
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+  11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+];
+
+function drawD20(canvas, rotX, rotY, displayRoll, isNat20, isNat1) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width;
   const H = canvas.height;
   const cx = W / 2;
   const cy = H / 2;
-  const R = Math.min(W, H) * 0.38;
+  const R = Math.min(W, H) * 0.37;
 
   ctx.clearRect(0, 0, W, H);
 
-  // Icosahedron vertices (unit sphere)
+  // Icosahedron unit-sphere vertices
   const phi = (1 + Math.sqrt(5)) / 2;
-  const verts = [
+  const rawVerts = [
     [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
     [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
     [phi, 0, 1], [-phi, 0, 1], [phi, 0, -1], [-phi, 0, -1]
-  ].map(v => {
+  ];
+  const verts = rawVerts.map(v => {
     const len = Math.sqrt(v[0]**2 + v[1]**2 + v[2]**2);
     return [v[0]/len, v[1]/len, v[2]/len];
   });
 
-  // 20 triangular faces of icosahedron
+  // 20 triangular faces
   const faces = [
     [0,1,8],[0,8,4],[0,4,5],[0,5,9],[0,9,1],
     [1,6,8],[8,6,10],[8,10,4],[4,10,2],[4,2,5],
@@ -55,164 +58,171 @@ function drawIcosahedron(canvas, rotX, rotY, roll, isNat20, isNat1) {
     [3,6,7],[3,7,11],[3,11,2],[3,2,10],[3,10,6]
   ];
 
-  // 3D Rotation matrices
+  // Rotation
   const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
   const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
 
-  const rotate = ([x, y, z]) => {
-    // Rotate around Y
+  const rotate3D = ([x, y, z]) => {
     let nx = x * cosY + z * sinY;
     let ny = y;
     let nz = -x * sinY + z * cosY;
-    // Rotate around X
-    let fx = nx;
-    let fy = ny * cosX - nz * sinX;
-    let fz = ny * sinX + nz * cosX;
-    return [fx, fy, fz];
+    return [nx, ny * cosX - nz * sinX, ny * sinX + nz * cosX];
   };
 
-  // Project 3D → 2D (simple perspective)
+  // Perspective projection
   const project = ([x, y, z]) => {
-    const fov = 2.8;
+    const fov = 3.2;
     const d = fov - z;
     return [cx + (x * R * fov) / d, cy - (y * R * fov) / d, z];
   };
 
-  // Compute rotated vertices + their projections
-  const rotVerts = verts.map(v => rotate(v));
-  const projVerts = rotVerts.map(v => project(v));
+  const rotVerts = verts.map(rotate3D);
+  const projVerts = rotVerts.map(project);
 
-  // Sort faces back-to-front (painter's algorithm)
-  const faceDepths = faces.map((f, i) => {
-    const z = (rotVerts[f[0]][2] + rotVerts[f[1]][2] + rotVerts[f[2]][2]) / 3;
-    return { i, z };
-  }).sort((a, b) => a.z - b.z);
+  // Compute face data: depth, normal, center
+  const faceData = faces.map((f, i) => {
+    const r0 = rotVerts[f[0]], r1 = rotVerts[f[1]], r2 = rotVerts[f[2]];
+    const p0 = projVerts[f[0]], p1 = projVerts[f[1]], p2 = projVerts[f[2]];
 
-  // Color palette for faces
-  const faceColors = [
-    '#0f172a','#1e293b','#162032','#0d1b2a','#13253a',
-    '#1a2d40','#0a1628','#172236','#0e1e30','#162d40',
-    '#1b3050','#0f2035','#1a2840','#112035','#162540',
-    '#1e3045','#0a1e30','#18293c','#0d2035','#152840'
-  ];
+    // Z-depth for painter's algo
+    const z = (r0[2] + r1[2] + r2[2]) / 3;
 
-  // Draw faces
-  faceDepths.forEach(({ i, z }) => {
-    const f = faces[i];
-    const [ax, ay] = projVerts[f[0]];
-    const [bx, by] = projVerts[f[1]];
-    const [cx2, cy2] = projVerts[f[2]];
+    // Screen-space normal for back-face culling
+    const ex = p1[0]-p0[0], ey = p1[1]-p0[1];
+    const fx = p2[0]-p0[0], fy = p2[1]-p0[1];
+    const nz = ex*fy - ey*fx;
 
-    // Back-face culling — compute normal Z
-    const ex = bx - ax, ey = by - ay;
-    const fx2 = cx2 - ax, fy2 = cy2 - ay;
-    const nz = ex * fy2 - ey * fx2;
-    if (nz < 0) return; // back face
+    // World-space normal for lighting
+    const ax = r1[0]-r0[0], ay = r1[1]-r0[1], az = r1[2]-r0[2];
+    const bx = r2[0]-r0[0], by = r2[1]-r0[1], bz = r2[2]-r0[2];
+    const nx = ay*bz - az*by;
+    const ny2 = az*bx - ax*bz;
+    const nz2 = ax*by - ay*bx;
+    const nlen = Math.sqrt(nx**2 + ny2**2 + nz2**2) || 1;
+    // Dot with light direction (0.4, 0.6, 1) normalized
+    const lx=0.33, ly=0.50, lz=0.8;
+    const dot = Math.max(0, (nx/nlen)*lx + (ny2/nlen)*ly + (nz2/nlen)*lz);
 
-    const brightness = Math.max(0, Math.min(1, (z + 1) / 2));
-    const isTop = i === 0; // front-most face shows the number
+    // Projected centroid for text
+    const pcx = (p0[0]+p1[0]+p2[0])/3;
+    const pcy = (p0[1]+p1[1]+p2[1])/3;
 
-    ctx.beginPath();
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by);
-    ctx.lineTo(cx2, cy2);
-    ctx.closePath();
-
-    // Fill color
-    let fillColor;
-    if (isNat20) {
-      fillColor = `rgba(${Math.round(180 + brightness * 75)}, ${Math.round(120 + brightness * 80)}, 0, 1)`;
-    } else if (isNat1) {
-      fillColor = `rgba(${Math.round(80 + brightness * 60)}, 0, 0, 1)`;
-    } else {
-      const b = Math.round(15 + brightness * 45);
-      const g = Math.round(20 + brightness * 55);
-      fillColor = `rgb(${b}, ${g}, ${Math.round(b * 2.5)})`;
-    }
-    ctx.fillStyle = fillColor;
-    ctx.fill();
-
-    // Edge lines
-    ctx.strokeStyle = isNat20 ? `rgba(255, 200, 0, ${0.3 + brightness * 0.5})`
-      : isNat1 ? `rgba(255,50,50,${0.3 + brightness * 0.4})`
-      : `rgba(245, 158, 11, ${0.15 + brightness * 0.45})`;
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
+    return { i, z, nz, dot, p0, p1, p2, pcx, pcy, visible: nz > 0 };
   });
 
-  // Find top face and draw number
-  const topFace = faceDepths[faceDepths.length - 1];
-  const f = faces[topFace.i];
-  const [ax, ay] = projVerts[f[0]];
-  const [bx, by] = projVerts[f[1]];
-  const [cx2, cy2] = projVerts[f[2]];
-  const faceCx = (ax + bx + cx2) / 3;
-  const faceCy = (ay + by + cy2) / 3;
+  // Sort back to front
+  const sorted = [...faceData].sort((a, b) => a.z - b.z);
 
-  // Compute back-face for top
-  const ex = bx - ax, ey = by - ay;
-  const fx2 = cx2 - ax, fy2 = cy2 - ay;
-  const topNz = ex * fy2 - ey * fx2;
+  sorted.forEach(({ i, nz, dot, p0, p1, p2, pcx, pcy, visible }) => {
+    if (!visible) return;
 
-  if (topNz >= 0) {
-    // Glow halo on top face
-    const grd = ctx.createRadialGradient(faceCx, faceCy, 0, faceCx, faceCy, R * 0.55);
+    const brightness = 0.25 + dot * 0.75;
+    const faceNum = FACE_NUMBERS[i];
+
+    // Face fill color
+    let r, g, b;
     if (isNat20) {
-      grd.addColorStop(0, 'rgba(255,220,50,0.55)');
-      grd.addColorStop(1, 'rgba(255,150,0,0)');
+      r = Math.round(180 + brightness * 75);
+      g = Math.round(90 + brightness * 80);
+      b = 0;
     } else if (isNat1) {
-      grd.addColorStop(0, 'rgba(255,30,30,0.45)');
-      grd.addColorStop(1, 'rgba(120,0,0,0)');
+      r = Math.round(60 + brightness * 80);
+      g = 0;
+      b = 0;
     } else {
-      grd.addColorStop(0, 'rgba(245,158,11,0.18)');
-      grd.addColorStop(1, 'rgba(245,158,11,0)');
+      r = Math.round(10 + brightness * 30);
+      g = Math.round(18 + brightness * 55);
+      b = Math.round(35 + brightness * 65);
     }
+
+    // Draw face polygon
     ctx.beginPath();
-    ctx.arc(faceCx, faceCy, R * 0.55, 0, Math.PI * 2);
-    ctx.fillStyle = grd;
+    ctx.moveTo(p0[0], p0[1]);
+    ctx.lineTo(p1[0], p1[1]);
+    ctx.lineTo(p2[0], p2[1]);
+    ctx.closePath();
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
     ctx.fill();
 
-    // Number text
-    const numStr = String(roll);
-    const fontSize = R * 0.45;
-    ctx.font = `900 ${fontSize}px Cinzel, serif`;
+    // Edge highlight
+    ctx.strokeStyle = isNat20
+      ? `rgba(255,220,50,${0.2 + dot*0.6})`
+      : isNat1
+      ? `rgba(255,60,60,${0.2 + dot*0.5})`
+      : `rgba(245,158,11,${0.1 + dot*0.5})`;
+    ctx.lineWidth = 0.9;
+    ctx.stroke();
+
+    // --- Number on each visible face ---
+    // Compute face area in screen space to scale text
+    const area = Math.abs(
+      (p1[0]-p0[0])*(p2[1]-p0[1]) - (p2[0]-p0[0])*(p1[1]-p0[1])
+    ) / 2;
+    if (area < 80) return; // too small to draw legible number
+
+    // Compute rotation angle for the text to face "up"
+    // Edge midpoint from p0→p1 defines orientation
+    const edgeMx = (p0[0]+p1[0])/2 - pcx;
+    const edgeMy = (p0[1]+p1[1])/2 - pcy;
+    const angle = Math.atan2(edgeMy, edgeMx) + Math.PI / 2;
+
+    const fontSize = Math.max(9, Math.min(22, Math.sqrt(area) * 0.5));
+    const isTopFace = faceNum === displayRoll;
+
+    ctx.save();
+    ctx.translate(pcx, pcy);
+    ctx.rotate(angle);
+
+    // Highlight the active result face
+    if (isTopFace) {
+      ctx.shadowColor = isNat20 ? '#fff' : isNat1 ? '#ff3333' : '#f59e0b';
+      ctx.shadowBlur = 12;
+    }
+
+    ctx.font = `900 ${isTopFace ? fontSize * 1.3 : fontSize}px Cinzel, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.shadowColor = isNat20 ? '#fff' : isNat1 ? '#ff3333' : '#f59e0b';
-    ctx.shadowBlur = 14;
-    ctx.fillStyle = isNat20 ? '#1c1917' : isNat1 ? '#fecaca' : '#fef08a';
-    ctx.fillText(numStr, faceCx, faceCy);
+
+    // Text color
+    if (isNat20) {
+      ctx.fillStyle = isTopFace ? '#fff' : `rgba(255,240,180,${0.5 + dot*0.5})`;
+    } else if (isNat1) {
+      ctx.fillStyle = isTopFace ? '#fca5a5' : `rgba(255,180,180,${0.5 + dot*0.5})`;
+    } else {
+      ctx.fillStyle = isTopFace
+        ? '#fef08a'
+        : `rgba(253,230,138,${0.4 + dot*0.5})`;
+    }
+
+    ctx.fillText(String(faceNum), 0, 0);
     ctx.shadowBlur = 0;
+    ctx.restore();
+  });
 
-    // D20 label
-    ctx.font = `bold ${R * 0.18}px Cinzel, serif`;
-    ctx.fillStyle = isNat20 ? '#78350f88' : '#f59e0b55';
-    ctx.fillText('D20', faceCx, faceCy + fontSize * 0.75);
-  }
-
-  // Outer glow ring
-  const grad = ctx.createRadialGradient(cx, cy, R * 0.85, cx, cy, R * 1.2);
+  // Outer glow
+  const grd = ctx.createRadialGradient(cx, cy, R * 0.8, cx, cy, R * 1.3);
   if (isNat20) {
-    grad.addColorStop(0, 'rgba(245,158,11,0.5)');
-    grad.addColorStop(1, 'rgba(245,158,11,0)');
+    grd.addColorStop(0, 'rgba(245,158,11,0.45)');
+    grd.addColorStop(1, 'rgba(245,158,11,0)');
   } else if (isNat1) {
-    grad.addColorStop(0, 'rgba(239,68,68,0.5)');
-    grad.addColorStop(1, 'rgba(239,68,68,0)');
+    grd.addColorStop(0, 'rgba(239,68,68,0.45)');
+    grd.addColorStop(1, 'rgba(239,68,68,0)');
   } else {
-    grad.addColorStop(0, 'rgba(245,158,11,0.18)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    grd.addColorStop(0, 'rgba(245,158,11,0.12)');
+    grd.addColorStop(1, 'rgba(245,158,11,0)');
   }
   ctx.beginPath();
-  ctx.arc(cx, cy, R * 1.15, 0, Math.PI * 2);
-  ctx.fillStyle = grad;
+  ctx.arc(cx, cy, R * 1.25, 0, Math.PI * 2);
+  ctx.fillStyle = grd;
   ctx.fill();
 }
 
 export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
   const canvasRef = useRef(null);
+  const rotRef = useRef({ x: 0.4, y: 0.3 });
+  const velRef = useRef({ x: 0.005, y: 0.008 });
   const animRef = useRef(null);
-  const rotRef = useRef({ x: 0.5, y: 0.3 });
-  const velRef = useRef({ x: 0.004, y: 0.007 });
+
   const [selectedStat, setSelectedStat] = useState('str');
   const [customMod, setCustomMod] = useState(0);
   const [localRolling, setLocalRolling] = useState(false);
@@ -226,21 +236,18 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
   const isNat20 = !!lastRoll?.isNat20 && !rollingState;
   const isNat1 = !!lastRoll?.isNat1 && !rollingState;
 
-  // Animation loop
+  // Main render loop
   useEffect(() => {
     let frame;
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const loop = () => {
       rotRef.current.x += velRef.current.x;
       rotRef.current.y += velRef.current.y;
-      drawIcosahedron(canvas, rotRef.current.x, rotRef.current.y, currentRoll, isNat20, isNat1);
+      drawD20(canvas, rotRef.current.x, rotRef.current.y, currentRoll, isNat20, isNat1);
       frame = requestAnimationFrame(loop);
     };
-
     frame = requestAnimationFrame(loop);
-    animRef.current = frame;
     return () => cancelAnimationFrame(frame);
   }, [currentRoll, isNat20, isNat1]);
 
@@ -249,29 +256,28 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
     setLocalRolling(true);
     playDiceRollSound();
 
-    // Fast spin velocity on click
+    // Blast spin velocity
     velRef.current = {
-      x: (Math.random() > 0.5 ? 1 : -1) * (0.08 + Math.random() * 0.08),
-      y: (Math.random() > 0.5 ? 1 : -1) * (0.10 + Math.random() * 0.10)
+      x: (Math.random() > 0.5 ? 1 : -1) * (0.07 + Math.random() * 0.07),
+      y: (Math.random() > 0.5 ? 1 : -1) * (0.09 + Math.random() * 0.09)
     };
 
-    // Flicker number
+    // Flicker numbers through all 20 values
     let count = 0;
-    const interval = setInterval(() => {
+    const iv = setInterval(() => {
       setDisplayRoll(Math.floor(Math.random() * 20) + 1);
-      count++;
-      if (count >= 22) clearInterval(interval);
+      if (++count >= 24) clearInterval(iv);
     }, 65);
 
-    // Slow back down over 1.6s
-    const startTime = Date.now();
+    // Decelerate over 1.7s
     const startVel = { ...velRef.current };
+    const t0 = Date.now();
     const decel = () => {
-      const t = Math.min(1, (Date.now() - startTime) / 1600);
+      const t = Math.min(1, (Date.now() - t0) / 1700);
       const ease = 1 - Math.pow(1 - t, 3);
       velRef.current = {
-        x: startVel.x * (1 - ease) + 0.004 * ease,
-        y: startVel.y * (1 - ease) + 0.007 * ease,
+        x: startVel.x * (1 - ease) + 0.005 * ease,
+        y: startVel.y * (1 - ease) + 0.008 * ease,
       };
       if (t < 1) requestAnimationFrame(decel);
     };
@@ -284,13 +290,11 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
         int: 'Интеллект (INT)', wis: 'Мудрость (WIS)', cha: 'Харизма (CHA)'
       };
       onRoll({ modifier: totalModifier, statName: statNameMap[selectedStat] || 'D20 Check' });
-    }, 1700);
+    }, 1800);
   };
 
   useEffect(() => {
-    if (lastRoll) {
-      if (lastRoll.isNat20) confetti({ particleCount: 180, spread: 100, origin: { y: 0.6 } });
-    }
+    if (lastRoll?.isNat20) confetti({ particleCount: 180, spread: 100, origin: { y: 0.6 } });
   }, [lastRoll]);
 
   return (
@@ -300,18 +304,12 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
           <Dice5 className="w-5 h-5 text-amber-400" />
           <h3 className="font-cinzel text-sm font-bold text-amber-300">3D Икосаэдр D20</h3>
         </div>
-        <span className="text-[10px] text-amber-400/80 font-mono">20 граней · WebGL Canvas</span>
+        <span className="text-[10px] text-amber-400/80 font-mono">20 граней · 3D рендер</span>
       </div>
 
-      {/* 3D Canvas */}
+      {/* Canvas */}
       <div className="flex flex-col items-center cursor-pointer" onClick={handleRollClick}>
-        <canvas
-          ref={canvasRef}
-          width={220}
-          height={220}
-          className="rounded-xl"
-          style={{ imageRendering: 'pixelated' }}
-        />
+        <canvas ref={canvasRef} width={220} height={220} className="rounded-xl" />
         <p className="text-[10px] text-amber-400/50 mt-1">
           {rollingState ? '⟳ Вращается...' : '← Нажмите для броска →'}
         </p>

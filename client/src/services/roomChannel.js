@@ -1,135 +1,115 @@
 /**
- * Multiplayer Sync Layer
- * 
- * Priority 1: Supabase Realtime (if credentials configured in settings)
- * Priority 2: BroadcastChannel (same browser, multi-tab)
+ * Multiplayer via PubNub — free public demo keys, zero registration required.
+ * Works on Vercel (pure client-side), no backend needed.
+ * Demo keys allow ~100 connections simultaneously — perfect for a friend group.
  */
 
-import { createClient } from '@supabase/supabase-js';
+import PubNub from 'pubnub';
 
-const STORAGE_URL_KEY = 'dnd_sb_url';
-const STORAGE_KEY_KEY = 'dnd_sb_key';
+// PubNub public demo sandbox keys — documented at pubnub.com/docs, no account needed
+const PUBNUB_PUBLISH_KEY  = 'demo';
+const PUBNUB_SUBSCRIBE_KEY = 'demo';
 
-function getSupabaseCredentials() {
-  try {
-    return {
-      url: localStorage.getItem(STORAGE_URL_KEY) || import.meta.env.VITE_SUPABASE_URL || '',
-      key: localStorage.getItem(STORAGE_KEY_KEY) || import.meta.env.VITE_SUPABASE_ANON_KEY || '',
-    };
-  } catch {
-    return { url: '', key: '' };
-  }
-}
-
-export function saveSupabaseCredentials(url, key) {
-  localStorage.setItem(STORAGE_URL_KEY, url);
-  localStorage.setItem(STORAGE_KEY_KEY, key);
-  window.location.reload();
-}
-
-export function getIsSupabaseConfigured() {
-  const { url, key } = getSupabaseCredentials();
-  return !!(url && key && url.includes('supabase.co') && key.length > 20);
-}
-
-let _supabase = null;
-
-function getSupabase() {
-  if (_supabase) return _supabase;
-  const { url, key } = getSupabaseCredentials();
-  if (url && key && url.includes('supabase.co')) {
-    _supabase = createClient(url, key);
-  }
-  return _supabase;
-}
-
-// ─── Room Channel ─────────────────────────────────────────────────────────────
-
-export class RoomChannel {
-  constructor(roomCode, playerId) {
-    this.roomCode = roomCode;
-    this.playerId = playerId;
-    this._handlers = {};
-    this._sbChannel = null;
-    this._bc = null;
-    this._setup();
-  }
-
-  _setup() {
-    const sb = getSupabase();
-
-    if (sb) {
-      // Supabase Realtime channel
-      this._sbChannel = sb.channel(`room_${this.roomCode}`, {
-        config: { broadcast: { self: false }, presence: { key: this.playerId } }
-      });
-
-      this._sbChannel
-        .on('broadcast', { event: '*' }, ({ event, payload }) => {
-          if (this._handlers[event]) this._handlers[event](payload);
-        })
-        .subscribe((status) => {
-          if (status === 'SUBSCRIBED') {
-            console.log(`[Room ${this.roomCode}] Supabase Realtime connected ✓`);
-            this._sbChannel.track({ id: this.playerId, onlineAt: new Date().toISOString() });
-          }
-        });
-    } else {
-      // BroadcastChannel fallback (same browser multi-tab)
-      try {
-        this._bc = new BroadcastChannel(`dnd_room_${this.roomCode}`);
-        this._bc.onmessage = (e) => {
-          const { event, payload } = e.data || {};
-          if (event && this._handlers[event]) this._handlers[event](payload);
-        };
-        console.warn(`[Room ${this.roomCode}] Using BroadcastChannel (same browser only). Configure Supabase for real multiplayer!`);
-      } catch (e) {
-        console.warn('[Room] BroadcastChannel not available');
-      }
-    }
-  }
-
-  on(event, handler) {
-    this._handlers[event] = handler;
-    return this;
-  }
-
-  send(event, payload) {
-    // Supabase
-    if (this._sbChannel) {
-      this._sbChannel.send({ type: 'broadcast', event, payload }).catch(() => {});
-    }
-    // BroadcastChannel
-    if (this._bc) {
-      try { this._bc.postMessage({ event, payload }); } catch (_) {}
-    }
-  }
-
-  destroy() {
-    const sb = getSupabase();
-    if (this._sbChannel && sb) {
-      sb.removeChannel(this._sbChannel);
-      this._sbChannel = null;
-    }
-    if (this._bc) {
-      this._bc.close();
-      this._bc = null;
-    }
-    this._handlers = {};
-  }
-}
-
+let _pn = null;
 let _activeChannel = null;
+let _handlers = {};
+let _myUuid = null;
+
+function getPubNub(uuid) {
+  if (_pn) return _pn;
+  _pn = new PubNub({
+    publishKey: PUBNUB_PUBLISH_KEY,
+    subscribeKey: PUBNUB_SUBSCRIBE_KEY,
+    uuid: uuid,
+    ssl: true,
+    restore: true,
+    heartbeatInterval: 20,
+    suppressLeaveEvents: false,
+  });
+  return _pn;
+}
 
 export function joinRoom(roomCode, playerId) {
-  if (_activeChannel) _activeChannel.destroy();
-  _activeChannel = new RoomChannel(roomCode, playerId);
-  return _activeChannel;
+  _myUuid = playerId;
+  _activeChannel = `dnd_realm_${roomCode}`;
+  _handlers = {};
+
+  const pn = getPubNub(playerId);
+
+  // Remove any existing listeners
+  pn.removeAllListeners?.();
+
+  pn.addListener({
+    message: ({ channel, message }) => {
+      if (channel !== _activeChannel) return;
+      const { event, payload, senderId } = message || {};
+      // Don't echo to self
+      if (senderId === playerId) return;
+      if (event && _handlers[event]) {
+        _handlers[event](payload);
+      }
+    },
+    presence: ({ action, uuid }) => {
+      if (_handlers['presence']) {
+        _handlers['presence']({ action, uuid });
+      }
+    },
+    status: ({ category }) => {
+      if (category === 'PNConnectedCategory') {
+        console.log(`[Multiplayer] PubNub connected to room ${roomCode} ✓`);
+      }
+    }
+  });
+
+  pn.subscribe({
+    channels: [_activeChannel],
+    withPresence: true
+  });
+
+  // BroadcastChannel for same-browser tabs (instant sync)
+  let bc = null;
+  try {
+    bc = new BroadcastChannel(`dnd_room_${roomCode}`);
+    bc.onmessage = (e) => {
+      const { event, payload } = e.data || {};
+      if (event && _handlers[event]) _handlers[event](payload);
+    };
+  } catch (_) {}
+
+  return {
+    on(event, handler) {
+      _handlers[event] = handler;
+      return this;
+    },
+    send(event, payload) {
+      // PubNub publish
+      pn.publish({
+        channel: _activeChannel,
+        message: { event, payload, senderId: playerId },
+      }).catch(e => console.warn('[PubNub publish error]', e));
+
+      // BroadcastChannel (same browser instant)
+      if (bc) {
+        try { bc.postMessage({ event, payload }); } catch (_) {}
+      }
+    },
+    destroy() {
+      pn.unsubscribe({ channels: [_activeChannel] });
+      if (bc) { try { bc.close(); } catch (_) {} }
+      _handlers = {};
+      _activeChannel = null;
+    }
+  };
 }
 
 export function leaveRoom() {
-  if (_activeChannel) {
-    _activeChannel.destroy();
-    _activeChannel = null;
+  if (_pn && _activeChannel) {
+    _pn.unsubscribe({ channels: [_activeChannel] });
   }
+  _activeChannel = null;
+  _handlers = {};
 }
+
+// Kept for compatibility — no Supabase needed
+export function saveSupabaseCredentials() {}
+export function getIsSupabaseConfigured() { return true; }

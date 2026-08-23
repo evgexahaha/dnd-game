@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { joinRoom, leaveRoom, saveSupabaseCredentials, getIsSupabaseConfigured } from './services/roomChannel';
+import { joinRoom } from './services/roomChannel';
 import { fetchAiDmNarrative } from './services/aiDmClient';
 
 import Header from './components/Header';
@@ -9,7 +9,6 @@ import GameTabletop from './components/GameTabletop';
 import D20Dice from './components/D20Dice';
 import ChatPanel from './components/ChatPanel';
 import CharacterPanel from './components/CharacterPanel';
-import SupabaseSetup from './components/SupabaseSetup';
 
 const LOCAL_ACCOUNT_KEY = 'dnd_user_account_profile_v1';
 
@@ -62,7 +61,6 @@ export default function App() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showCharacterPanel, setShowCharacterPanel] = useState(false);
   const [showDiceRoller, setShowDiceRoller] = useState(true);
-  const [showSupabaseSetup, setShowSupabaseSetup] = useState(false);
 
   // Game Realtime States
   const [lastRoll, setLastRoll] = useState(null);
@@ -70,7 +68,6 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
 
   const channelRef = useRef(null);
-  const supabaseReady = getIsSupabaseConfigured();
 
   // Save account changes both to state & localStorage
   const updateAccountProfile = (updatedData) => {
@@ -387,26 +384,6 @@ export default function App() {
           onUpdateHp={(newHp) => updateAccountProfile({ hp: newHp })}
           onClose={() => setShowCharacterPanel(false)}
         />
-      )}
-
-      {showSupabaseSetup && (
-        <SupabaseSetup
-          isConfigured={supabaseReady}
-          onSave={(url, key) => saveSupabaseCredentials(url, key)}
-          onClose={() => setShowSupabaseSetup(false)}
-        />
-      )}
-
-      {/* Supabase setup nudge if not configured */}
-      {!supabaseReady && !room && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50">
-          <button
-            onClick={() => setShowSupabaseSetup(true)}
-            className="px-4 py-2 rounded-xl bg-amber-600/90 hover:bg-amber-500 text-slate-950 text-xs font-bold shadow-lg flex items-center gap-2 animate-pulse"
-          >
-            ⚠️ Настроить мультиплеер (Supabase) — кенты не видят друг друга!
-          </button>
-        </div>
       )}
     </div>
   );
