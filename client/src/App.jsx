@@ -89,9 +89,28 @@ export default function App() {
     }
   };
 
-  // Broadcast room state to all peers in the channel
+  // roomRef always mirrors the latest room state for use inside event closures
+  const roomRef = useRef(null);
+  useEffect(() => { roomRef.current = room; }, [room]);
+
+  // Merge two player arrays: union by id, newer position/data wins
+  const mergePlayers = (existing = [], incoming = []) => {
+    const map = new Map();
+    existing.forEach(p => map.set(p.id, p));
+    incoming.forEach(p => {
+      if (map.has(p.id)) {
+        map.set(p.id, { ...map.get(p.id), ...p });
+      } else {
+        map.set(p.id, p);
+      }
+    });
+    return Array.from(map.values());
+  };
+
+  // Broadcast the full room to all peers (sets local state too)
   const broadcastRoomUpdate = (updatedRoom) => {
     setRoom(updatedRoom);
+    roomRef.current = updatedRoom;
     if (channelRef.current) {
       channelRef.current.send('room_updated', updatedRoom);
     }
@@ -107,23 +126,77 @@ export default function App() {
     }
   };
 
-  // Connect to room channel and subscribe to events
+  // Connect to room channel and wire up all sync events
   const joinRealtimeRoom = (roomCode, player) => {
     if (channelRef.current) channelRef.current.destroy();
     const ch = joinRoom(roomCode, player.id);
+
+    // Full room state received — smart-merge players so nobody gets erased
     ch.on('room_updated', (payload) => {
-      setRoom(payload);
-      const me = payload?.players?.find(p => p.id === player.id);
-      if (me) setCurrentPlayer(me);
+      if (!payload) return;
+      setRoom(prev => {
+        if (!prev) return payload;
+        const mergedPlayers = mergePlayers(prev.players, payload.players);
+        // Merge gameLogs — keep unique by id
+        const logMap = new Map();
+        [...(prev.gameLog || []), ...(payload.gameLog || [])].forEach(l => logMap.set(l.id, l));
+        const mergedLog = Array.from(logMap.values()).sort((a, b) => a.id.localeCompare(b.id));
+        return { ...prev, ...payload, players: mergedPlayers, gameLog: mergedLog };
+      });
+      // Update own currentPlayer data if it changed
+      setCurrentPlayer(prev => {
+        const me = payload?.players?.find(p => p.id === player.id);
+        return me ? { ...prev, ...me } : prev;
+      });
     });
+
+    // Someone new joined — add them to our local room & re-broadcast for them
+    ch.on('player_joined', (newPlayer) => {
+      if (!newPlayer || newPlayer.id === player.id) return;
+      setRoom(prev => {
+        if (!prev) return null;
+        const alreadyIn = prev.players.some(p => p.id === newPlayer.id);
+        const players = alreadyIn
+          ? prev.players.map(p => p.id === newPlayer.id ? { ...p, ...newPlayer } : p)
+          : [...prev.players, newPlayer];
+        const joinMsg = alreadyIn ? [] : [{
+          id: `sys-join-${newPlayer.id}`,
+          sender: 'Система',
+          isSystem: true,
+          text: `${newPlayer.nickname} присоединился к отряду!`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }];
+        const updated = { ...prev, players, gameLog: [...prev.gameLog, ...joinMsg] };
+        // Only broadcast back if I was here first (avoid ping-pong — only if I have more players)
+        if (prev.players.length >= 1) {
+          setTimeout(() => {
+            if (channelRef.current) channelRef.current.send('room_updated', updated);
+          }, 100);
+        }
+        return updated;
+      });
+    });
+
+    // Someone is asking for current state (new joiner requesting sync)
+    ch.on('request_sync', () => {
+      const current = roomRef.current;
+      if (current && channelRef.current) {
+        setTimeout(() => {
+          channelRef.current.send('room_updated', current);
+        }, 150);
+      }
+    });
+
     ch.on('dice_rolled', (payload) => {
       setLastRoll(payload);
       setIsRolling(true);
       setTimeout(() => setIsRolling(false), 1800);
     });
+
     ch.on('ai_thinking', (payload) => {
       setIsAiThinking(!!payload);
     });
+
     channelRef.current = ch;
   };
 
@@ -171,49 +244,39 @@ export default function App() {
     const joiningPlayer = {
       ...updatedAccount,
       id: updatedAccount.id || `usr_${Date.now()}`,
-      position: { x: 380, y: 220 },
+      position: { x: 300 + Math.floor(Math.random() * 120), y: 180 + Math.floor(Math.random() * 120) },
       isHost: false
     };
 
-    let existingRoom = room;
-    if (!existingRoom) {
-      existingRoom = {
-        code,
-        players: [],
-        gameLog: [
-          {
-            id: 'msg-init',
-            sender: 'AI Dungeon Master',
-            isAi: true,
-            text: `Добро пожаловать в лобби ${code}! Отряд собирается в подземелье.`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            suggestedActions: ["Приготовиться к приключению", "Осмотреться"]
-          }
-        ]
-      };
-    }
-
-    const updatedPlayers = [...existingRoom.players.filter(p => p.id !== joiningPlayer.id), joiningPlayer];
-    const updatedRoom = {
-      ...existingRoom,
+    // Set a local placeholder room while we wait for sync from host
+    const placeholderRoom = {
       code,
-      players: updatedPlayers,
-      gameLog: [
-        ...existingRoom.gameLog,
-        {
-          id: `sys-${Date.now()}`,
-          sender: 'Система',
-          isSystem: true,
-          text: `${joiningPlayer.nickname} присоединился к отряду!`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }
-      ]
+      players: [joiningPlayer],
+      gameLog: [{
+        id: 'msg-join-init',
+        sender: 'AI Dungeon Master',
+        isAi: true,
+        text: `Подключение к лобби ${code}... Запрашиваем состояние у отряда.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        suggestedActions: []
+      }]
     };
 
     setCurrentPlayer(joiningPlayer);
-    setRoom(updatedRoom);
+    setRoom(placeholderRoom);
+    roomRef.current = placeholderRoom;
+
+    // 1. Connect to channel
     joinRealtimeRoom(code, joiningPlayer);
-    broadcastRoomUpdate(updatedRoom);
+
+    // 2. Announce ourselves so existing players add us
+    setTimeout(() => {
+      if (channelRef.current) {
+        channelRef.current.send('player_joined', joiningPlayer);
+        // 3. Request full current state from host
+        channelRef.current.send('request_sync', { requesterId: joiningPlayer.id });
+      }
+    }, 400);
   };
 
   // Move Token
