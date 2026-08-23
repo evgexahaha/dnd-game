@@ -10,10 +10,50 @@ import D20Dice from './components/D20Dice';
 import ChatPanel from './components/ChatPanel';
 import CharacterPanel from './components/CharacterPanel';
 
-// Local BroadcastChannel fallback for multi-tab/same-network client sync
+const LOCAL_ACCOUNT_KEY = 'dnd_user_account_profile_v1';
+
+// Default initial account profile if user has none saved
+const defaultAccount = {
+  id: `usr_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+  nickname: 'Искатель Приключений',
+  avatar: 'preset_knight',
+  characterClass: 'Паладин (Paladin)',
+  hp: 12,
+  maxHp: 12,
+  ac: 15,
+  stats: { str: 14, dex: 12, con: 14, int: 10, wis: 10, cha: 8 }
+};
+
+// Helper to load persistent account from localStorage
+function loadSavedAccount() {
+  try {
+    const raw = localStorage.getItem(LOCAL_ACCOUNT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.nickname) return parsed;
+    }
+  } catch (e) {
+    console.warn("Could not load account profile from localStorage:", e);
+  }
+  return defaultAccount;
+}
+
+// Helper to save persistent account to localStorage
+function saveAccountToStorage(account) {
+  try {
+    localStorage.setItem(LOCAL_ACCOUNT_KEY, JSON.stringify(account));
+  } catch (e) {
+    console.warn("Could not save account profile to localStorage:", e);
+  }
+}
+
+// Local BroadcastChannel fallback for multi-tab sync
 const localBroadcast = typeof window !== 'undefined' && window.BroadcastChannel ? new BroadcastChannel('dnd_realm_channel') : null;
 
 export default function App() {
+  // Persistent User Account Profile
+  const [accountProfile, setAccountProfile] = useState(loadSavedAccount());
+
   const [room, setRoom] = useState(null);
   const [currentPlayer, setCurrentPlayer] = useState(null);
   const [lobbyError, setLobbyError] = useState('');
@@ -29,6 +69,26 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
 
   const activeChannelRef = useRef(null);
+
+  // Save account changes both to state & localStorage
+  const updateAccountProfile = (updatedData) => {
+    const newProfile = { ...accountProfile, ...updatedData };
+    setAccountProfile(newProfile);
+    saveAccountToStorage(newProfile);
+
+    // If currently in a room, update active player token in room
+    if (room && currentPlayer) {
+      const updatedPlayers = room.players.map((p) => {
+        if (p.id === currentPlayer.id) {
+          return { ...p, ...updatedData };
+        }
+        return p;
+      });
+      const updatedRoom = { ...room, players: updatedPlayers };
+      setCurrentPlayer({ ...currentPlayer, ...updatedData });
+      broadcastRoomUpdate(updatedRoom);
+    }
+  };
 
   // Helper to sync room update to all connected peers
   const broadcastRoomUpdate = (updatedRoom) => {
@@ -46,20 +106,20 @@ export default function App() {
   };
 
   // Helper to sync dice roll to all peers
-  const broadcastDiceRoll = (rollResult) => {
-    setLastRoll(rollResult);
+  const broadcastDiceRoll = (rollData) => {
+    setLastRoll(rollData);
     setIsRolling(true);
-    setTimeout(() => setIsRolling(false), 1500);
+    setTimeout(() => setIsRolling(false), 1800);
 
     if (activeChannelRef.current) {
       activeChannelRef.current.send({
         type: 'broadcast',
         event: 'dice_rolled',
-        payload: rollResult
+        payload: rollData
       });
     }
     if (localBroadcast) {
-      localBroadcast.postMessage({ type: 'dice_rolled', payload: rollResult });
+      localBroadcast.postMessage({ type: 'dice_rolled', payload: rollData });
     }
   };
 
@@ -79,7 +139,7 @@ export default function App() {
       .on('broadcast', { event: 'dice_rolled' }, ({ payload }) => {
         setLastRoll(payload);
         setIsRolling(true);
-        setTimeout(() => setIsRolling(false), 1500);
+        setTimeout(() => setIsRolling(false), 1800);
       })
       .on('broadcast', { event: 'ai_thinking' }, ({ payload }) => {
         setIsAiThinking(payload);
@@ -97,7 +157,6 @@ export default function App() {
 
     activeChannelRef.current = channel;
 
-    // Listen to local browser multi-tab fallback
     if (localBroadcast) {
       localBroadcast.onmessage = (msg) => {
         if (msg.data.type === 'room_updated') {
@@ -105,7 +164,7 @@ export default function App() {
         } else if (msg.data.type === 'dice_rolled') {
           setLastRoll(msg.data.payload);
           setIsRolling(true);
-          setTimeout(() => setIsRolling(false), 1500);
+          setTimeout(() => setIsRolling(false), 1800);
         }
       };
     }
@@ -114,17 +173,12 @@ export default function App() {
   // Create Lobby Handler
   const handleCreateRoom = ({ nickname, characterClass }) => {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const playerId = `player_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+    const updatedAccount = { ...accountProfile, nickname, characterClass };
+    updateAccountProfile(updatedAccount);
 
     const hostPlayer = {
-      id: playerId,
-      nickname: nickname || 'Герой 1',
-      avatar: 'preset_knight',
-      characterClass: characterClass || 'Паладин (Paladin)',
-      hp: 12,
-      maxHp: 12,
-      ac: 15,
-      stats: { str: 14, dex: 12, con: 14, int: 10, wis: 10, cha: 8 },
+      ...updatedAccount,
+      id: updatedAccount.id || `usr_${Date.now()}`,
       position: { x: 220, y: 220 },
       isHost: true
     };
@@ -154,17 +208,12 @@ export default function App() {
   // Join Lobby Handler
   const handleJoinRoom = ({ roomCode, nickname, characterClass }) => {
     const code = roomCode.toUpperCase().trim();
-    const playerId = `player_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+    const updatedAccount = { ...accountProfile, nickname, characterClass };
+    updateAccountProfile(updatedAccount);
 
-    const newPlayer = {
-      id: playerId,
-      nickname: nickname || 'Присоединившийся Герой',
-      avatar: 'preset_wizard',
-      characterClass: characterClass || 'Маг (Wizard)',
-      hp: 8,
-      maxHp: 8,
-      ac: 12,
-      stats: { str: 8, dex: 14, con: 12, int: 16, wis: 12, cha: 10 },
+    const joiningPlayer = {
+      ...updatedAccount,
+      id: updatedAccount.id || `usr_${Date.now()}`,
       position: { x: 380, y: 220 },
       isHost: false
     };
@@ -187,7 +236,7 @@ export default function App() {
       };
     }
 
-    const updatedPlayers = [...existingRoom.players.filter(p => p.id !== playerId), newPlayer];
+    const updatedPlayers = [...existingRoom.players.filter(p => p.id !== joiningPlayer.id), joiningPlayer];
     const updatedRoom = {
       ...existingRoom,
       code,
@@ -198,31 +247,15 @@ export default function App() {
           id: `sys-${Date.now()}`,
           sender: 'Система',
           isSystem: true,
-          text: `${newPlayer.nickname} присоединился к отряду!`,
+          text: `${joiningPlayer.nickname} присоединился к отряду!`,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }
       ]
     };
 
-    setCurrentPlayer(newPlayer);
+    setCurrentPlayer(joiningPlayer);
     setRoom(updatedRoom);
-    joinRealtimeRoom(code, newPlayer);
-    broadcastRoomUpdate(updatedRoom);
-  };
-
-  // Profile Update
-  const handleSaveProfile = (updatedProfile) => {
-    if (!room || !currentPlayer) return;
-
-    const updatedPlayers = room.players.map((p) => {
-      if (p.id === currentPlayer.id) {
-        return { ...p, ...updatedProfile };
-      }
-      return p;
-    });
-
-    const updatedRoom = { ...room, players: updatedPlayers };
-    setCurrentPlayer({ ...currentPlayer, ...updatedProfile });
+    joinRealtimeRoom(code, joiningPlayer);
     broadcastRoomUpdate(updatedRoom);
   };
 
@@ -291,7 +324,6 @@ export default function App() {
     let updatedRoom = { ...room, gameLog: [...room.gameLog, userMsg] };
     broadcastRoomUpdate(updatedRoom);
 
-    // AI Thinking status
     setIsAiThinking(true);
     if (activeChannelRef.current) {
       activeChannelRef.current.send({ type: 'broadcast', event: 'ai_thinking', payload: true });
@@ -326,18 +358,13 @@ export default function App() {
     }
   };
 
-  // Update HP
-  const handleUpdateHp = (newHp) => {
-    handleSaveProfile({ hp: newHp });
-  };
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       {/* Header */}
       <Header
         roomCode={room?.code}
         players={room?.players || []}
-        currentPlayer={currentPlayer}
+        currentPlayer={currentPlayer || accountProfile}
         onOpenProfile={() => setShowProfileModal(true)}
         onOpenCharacter={() => setShowCharacterPanel(true)}
         onToggleDice={() => setShowDiceRoller(!showDiceRoller)}
@@ -346,9 +373,11 @@ export default function App() {
       {/* Main Interface */}
       {!room ? (
         <LobbyModal
+          accountProfile={accountProfile}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
           error={lobbyError}
+          onOpenProfile={() => setShowProfileModal(true)}
         />
       ) : (
         <main className="flex-1 p-4 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-4 my-2">
@@ -356,7 +385,7 @@ export default function App() {
           <div className="lg:col-span-7 flex flex-col gap-4">
             <GameTabletop
               players={room.players}
-              currentPlayer={currentPlayer}
+              currentPlayer={currentPlayer || accountProfile}
               onMoveToken={handleMoveToken}
             />
 
@@ -365,7 +394,7 @@ export default function App() {
                 onRoll={handleRollDice}
                 lastRoll={lastRoll}
                 isRolling={isRolling}
-                stats={currentPlayer?.stats || {}}
+                stats={(currentPlayer || accountProfile)?.stats || {}}
               />
             )}
           </div>
@@ -382,20 +411,20 @@ export default function App() {
         </main>
       )}
 
-      {/* Modals & Drawers */}
+      {/* Modals */}
       {showProfileModal && (
         <ProfileModal
-          currentPlayer={currentPlayer}
+          currentPlayer={currentPlayer || accountProfile}
           room={room}
-          onSave={handleSaveProfile}
+          onSave={updateAccountProfile}
           onClose={() => setShowProfileModal(false)}
         />
       )}
 
       {showCharacterPanel && (
         <CharacterPanel
-          player={currentPlayer}
-          onUpdateHp={handleUpdateHp}
+          player={currentPlayer || accountProfile}
+          onUpdateHp={(newHp) => updateAccountProfile({ hp: newHp })}
           onClose={() => setShowCharacterPanel(false)}
         />
       )}
