@@ -1,11 +1,21 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Bot, User, Dice5, Sparkles, Loader2, Compass, AlertCircle } from 'lucide-react';
 
+const PRESET_ICONS = {
+  preset_knight: '⚔️',
+  preset_wizard: '🔮',
+  preset_rogue: '🗡️',
+  preset_cleric: '✨',
+  preset_barbarian: '🪓',
+  preset_bard: '🪕',
+  preset_ranger: '🏹',
+  preset_warlock: '👁️'
+};
+
 export default function ChatPanel({ gameLog = [], isAiThinking, onSendAction, onRollCheck }) {
   const [inputText, setInputText] = useState('');
   const chatEndRef = useRef(null);
 
-  // Auto scroll to bottom when new messages arrive
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [gameLog, isAiThinking]);
@@ -122,9 +132,14 @@ export default function ChatPanel({ gameLog = [], isAiThinking, onSendAction, on
           // Player Message
           return (
             <div key={log.id} className="flex gap-3 bg-slate-950/40 p-3 rounded-xl border border-slate-800">
-              <div className="w-8 h-8 rounded-full bg-slate-800 border border-amber-500/40 flex items-center justify-center font-bold text-xs text-amber-300">
-                {log.sender.substring(0, 1)}
-              </div>
+              {/* Player Avatar */}
+              {log.avatar?.startsWith('data:') ? (
+                <img src={log.avatar} alt={log.sender} className="w-8 h-8 rounded-full object-cover border border-amber-400" />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-slate-800 border border-amber-500/40 flex items-center justify-center font-bold text-sm text-amber-300">
+                  {PRESET_ICONS[log.avatar] || log.sender.substring(0, 1).toUpperCase()}
+                </div>
+              )}
               <div className="flex-1">
                 <div className="flex items-center justify-between text-xs mb-1">
                   <span className="font-bold text-amber-400">{log.sender}</span>
