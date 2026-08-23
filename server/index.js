@@ -3,6 +3,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+const { execSync } = require('child_process');
 require('dotenv').config();
 
 const { registerSocketEvents, rooms } = require('./socket/roomManager');
@@ -21,8 +23,22 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Serve static client assets in production
+// Ensure Client Build Folder Exists
 const clientBuildPath = path.join(__dirname, '../client/dist');
+const indexPath = path.join(clientBuildPath, 'index.html');
+
+if (!fs.existsSync(indexPath)) {
+  console.log('[Server] client/dist/index.html not found! Triggering automatic build...');
+  try {
+    const rootDir = path.join(__dirname, '..');
+    execSync('npm run build', { cwd: rootDir, stdio: 'inherit' });
+    console.log('[Server] Automatic build completed successfully!');
+  } catch (err) {
+    console.error('[Server] Failed to auto-build client bundle:', err.message);
+  }
+}
+
+// Serve static client assets
 app.use(express.static(clientBuildPath));
 
 // API Status & Lobby details endpoint
@@ -55,14 +71,10 @@ io.on('connection', (socket) => {
 
 // Fallback route for Single Page Application
 app.get('*', (req, res) => {
-  if (req.accepts('html')) {
-    res.sendFile(path.join(clientBuildPath, 'index.html'), (err) => {
-      if (err) {
-        res.send('D&D AI Game Server API is running! Start Vite dev server for client interface.');
-      }
-    });
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
   } else {
-    res.status(404).json({ error: 'Not found' });
+    res.status(500).send('D&D AI Game Server API is running, but client index.html could not be loaded. Please check build logs.');
   }
 });
 

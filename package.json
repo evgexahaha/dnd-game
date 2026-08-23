@@ -9,6 +9,7 @@
     "client": "npm --prefix client run dev",
     "dev": "concurrently \"node server/index.js\" \"npm --prefix client run dev\"",
     "build": "npm --prefix client install && npm --prefix client run build",
+    "postinstall": "npm --prefix client install && npm --prefix client run build",
     "install-all": "npm install && npm --prefix client install"
   },
   "keywords": ["dnd", "ai-dm", "multiplayer", "socket.io", "react", "3d-dice"],
