@@ -1,29 +1,43 @@
 /**
- * Client-Side AI Dungeon Master Engine
- * Free storytelling powered by Pollinations GET AI (100% free, no 402/429 limits) & RPG Generator
+ * Client-Side Hardcore Adaptive AI Dungeon Master Engine
+ * Maximum freedom: AI reacts dynamically to ANY player action, sentence, or crazy idea!
  */
 
-export async function fetchAiDmNarrative({ prompt, history = [], players = [], apiKey = null, provider = 'pollinations' }) {
-  const systemContext = `Ты — опытный Мастер Подземелий (Dungeon Master) в игре Dungeons & Dragons 5e. Описывай сцены на русском языке красочно, давай варианты действий и запрашивай проверки D20 при необходимости.`;
-  const fullPrompt = `${systemContext}\n\nКонтекст подземелья:\nИгроки: ${players.map(p => p.nickname).join(', ')}\nИстория: ${history.slice(-4).map(h => h.text).join(' | ')}\n\nДействие игрока: ${prompt}\n\nОпиши реакцию Мастера:`;
+const HARDCORE_DM_SYSTEM_PROMPT = `
+Ты — Импровизационный и Радикальный Мастер Подземелий (Dungeon Master) в Dungeons & Dragons 5e.
+ТВОЙ ГЛАВНЫЙ ПРИНЦИП: ПОЛНАЯ СВОБОДА ДЕЙСТВИЙ ИЖИВАЯ РЕАКЦИЯ НА ВСЁ, ЧТО СКАЖУТ ИЛИ СДЕЛАЮТ ИГРОКИ!
 
-  // 1. Try Pollinations GET API (unlimited free tier, no 402/429 rate limits)
+ПРАВИЛА РЕАКТИВНОГО ВЕДЕНИЯ:
+1. Игроки могут делать и говорить АБСОЛЮТНО ВСЁ, ЧТО УГОДНО! (взорвать стену факелом, приручить гоблина, притвориться призраком, подкупить врага, обмануть дракона, сломать мечом замок).
+2. НИКОГДА НЕ ЗАПРЕЩАЙ! Всегда используй правило D&D: "Ты можешь попробовать! Давай проверим броском D20".
+3. МИР И СЮЖЕТ МЕНЯЮТСЯ ОТ КАЖДОГО СЛОВА ИГРОКА:
+   - Сказали безумную идею? Мир реагирует мгновенно! Опиши последствия, шум, реакцию монстров и изменение окружения.
+   - Разрушили что-то? Опиши обломки и открывшийся проход.
+   - Попытались договориться? Дай шанс убеждения или обмана.
+4. В конце своего ответа всегда предлагай 3 ДИНАМИЧЕСКИХ варианта развития событий, которые вытекают ИМЕННО из последнего нестандартного поступка игрока!
+5. Если действие опасное или сложное — обязательно укажи проверку навыка в скобках [CHECK: Название Навыка, DC: число].
+`;
+
+export async function fetchAiDmNarrative({ prompt, history = [], players = [], apiKey = null }) {
+  const fullPrompt = `${HARDCORE_DM_SYSTEM_PROMPT}\n\nКонтекст отряда:\nИгроки: ${players.map(p => `${p.nickname} (${p.characterClass})`).join(', ')}\nИстория последних событий:\n${history.slice(-4).map(h => `${h.sender}: ${h.text}`).join('\n')}\n\nНЕСТАНДАРТНОЕ ДЕЙСТВИЕ ИГРОКА: "${prompt}"\n\nОпиши реакцию Мастера и мира на это действие:`;
+
+  // 1. Try Pollinations GET with seed & dynamic prompt
   try {
-    const seed = Math.floor(Math.random() * 1000000);
+    const seed = Math.floor(Math.random() * 999999);
     const url = `https://text.pollinations.ai/${encodeURIComponent(fullPrompt)}?model=openai&seed=${seed}`;
     
     const res = await fetch(url, { method: 'GET' });
     if (res.ok) {
       const text = await res.text();
-      if (text && text.length > 10 && !text.includes('Payment Required')) {
-        return parseNarrativeResponse(text, prompt);
+      if (text && text.length > 20 && !text.includes('Payment Required')) {
+        return parseAdaptiveResponse(text, prompt);
       }
     }
   } catch (e) {
-    console.warn("Pollinations GET API warning:", e.message);
+    console.warn("Pollinations fetch warning:", e.message);
   }
 
-  // 2. Try OpenRouter free tier if key provided
+  // 2. OpenRouter fallback if API key provided
   if (apiKey) {
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -34,65 +48,93 @@ export async function fetchAiDmNarrative({ prompt, history = [], players = [], a
         },
         body: JSON.stringify({
           model: 'meta-llama/llama-3.3-70b-instruct:free',
-          messages: [{ role: 'system', content: systemContext }, { role: 'user', content: fullPrompt }]
+          messages: [{ role: 'system', content: HARDCORE_DM_SYSTEM_PROMPT }, { role: 'user', content: fullPrompt }],
+          temperature: 0.9
         })
       });
       if (res.ok) {
         const data = await res.json();
         const text = data.choices[0].message.content;
-        return parseNarrativeResponse(text, prompt);
+        return parseAdaptiveResponse(text, prompt);
       }
     } catch (e) {
       console.warn("OpenRouter fetch warning:", e.message);
     }
   }
 
-  // 3. Fallback Dynamic D&D RPG Story Engine
-  return generateDynamicRpgNarrative(prompt, players);
+  // 3. Dynamic Improvised RPG Engine Fallback
+  return generateImprovisedResponse(prompt, players);
 }
 
-function parseNarrativeResponse(rawText, userPrompt) {
-  // Extract potential DC checks or actions
+function parseAdaptiveResponse(rawText, userPrompt) {
   let checkRequired = null;
-  if (rawText.toLowerCase().includes('проверк') || rawText.toLowerCase().includes('бросок') || rawText.toLowerCase().includes('d20')) {
-    checkRequired = { skill: "Внимательность (Perception)", dc: 12, description: "Проверка результата действия" };
+
+  // Extract check DC if present
+  const checkMatch = rawText.match(/\[CHECK:\s*([^,]+),\s*DC:\s*(\d+)\]/i);
+  if (checkMatch) {
+    checkRequired = {
+      skill: checkMatch[1].trim(),
+      dc: parseInt(checkMatch[2], 10),
+      description: `Проверка для действия: "${userPrompt}"`
+    };
+  } else if (userPrompt.length > 3) {
+    // Auto detect check needed for physical/magical/social actions
+    const lower = userPrompt.toLowerCase();
+    if (lower.includes('взорв') || lower.includes('слома') || lower.includes('удар') || lower.includes('атаку')) {
+      checkRequired = { skill: "Атлетика / Сила", dc: 13, description: "Проверка физического воздействия" };
+    } else if (lower.includes('убеди') || lower.includes('обман') || lower.includes('договор') || lower.includes('прируч')) {
+      checkRequired = { skill: "Убеждение / Обман", dc: 14, description: "Проверка социального взаимодействия" };
+    } else if (lower.includes('маги') || lower.includes('заклинания') || lower.includes('руны')) {
+      checkRequired = { skill: "Магия (Arcana)", dc: 12, description: "Проверка концентрации и магии" };
+    }
   }
+
+  // Extract or generate dynamic suggested choices
+  const suggestedActions = [
+    `Воспользоваться последствиями своего действия: "${userPrompt.slice(0, 25)}..."`,
+    "Бросить D20 на проверку успеха",
+    "Приготовиться к непредсказуемой реакции окружения"
+  ];
 
   return {
     narrative: rawText,
     checkRequired,
-    suggestedActions: [
-      "Осмотреть локацию подробнее",
-      "Приготовиться к возможному бою",
-      "Осторожно продвинуться вперед"
-    ]
+    suggestedActions
   };
 }
 
-function generateDynamicRpgNarrative(userPrompt, players) {
-  const partyNames = players.map(p => p.nickname).join(' и ');
-  const templates = [
+function generateImprovisedResponse(userPrompt, players) {
+  const partyNames = players.map(p => p.nickname).join(', ') || 'Отряд';
+
+  const responses = [
     {
-      text: `Мастер задумчиво прищуривается. Ваша попытка "${userPrompt}" заставляет эхо разноситься по мрачному залу подземелья. В тени за факелом что-то зловеще пошевелилось!`,
-      actions: ["Оснастить оружие и занять боевую стойку", "Зажечь факел и осмотреть тень", "Присесть и прокрасться тихо"],
-      check: { skill: "Внимательность (Perception)", dc: 13, description: "Обнаружение врагов в тени" }
+      text: `Мастер удивленно поднимает бровь! Идея "${userPrompt}" полностью меняет обстановку! Подземелье содрогается, факелы вспыхивают ярким светом, а из темного коридора доносится удивленный рык гоблинов.`,
+      check: { skill: "Скрытность / Ловкость", dc: 13, description: "Реакция на неожиданный ход" },
+      actions: [
+        `Продолжить реализацию задумки: "${userPrompt.slice(0, 20)}"`,
+        "Бросить D20 на проверку успеха",
+        "Обнажить оружие и занять позицию"
+      ]
     },
     {
-      text: `Каменные руны на полу подземелья на мгновение вспыхивают тусклым синим светом в ответ на действие "${userPrompt}". Воздух наполняется запахом древней магии и озона.`,
-      actions: ["Изучить древние руны (Проверка Магии)", "Отойти на безопасное расстояние", "Попросить мага расшифровать символ"],
-      check: { skill: "Магия (Arcana)", dc: 12, description: "Расшифровка магии рун" }
+      text: `Ваше неординарное действие "${userPrompt}" производит неожиданный эффект! Древние каменные плиты сдвигаются со скрежетом, открывая укрытый пылью тайный ход и древний алтарь.`,
+      check: { skill: "Внимательность (Perception)", dc: 12, description: "Исследование нового тайного хода" },
+      actions: [
+        "Осмотреть открывшийся тайный проход",
+        "Проверить алтарь на магические ловушки",
+        "Окликнуть группу и двигаться вместе"
+      ]
     },
     {
-      text: `Группа (${partyNames || 'Отряд'}) внимательно следит за обстановкой. Вы предпринимаете действие: "${userPrompt}". Впереди открывается старинный сундук со сгнившими оковками.`,
-      actions: ["Осмотреть сундук на ловушки (Бросить D20)", "Попытаться открыть замок", "Окликнуть соратников"],
-      check: { skill: "Анализ (Investigation)", dc: 11, description: "Поиск ловушек на сундуке" }
+      text: `Вы делаете нестандартный ход: "${userPrompt}". Враги замирают в замешательстве, не ожидая такой дерзости! Один из гоблинов выдерживает паузу и колеблется, словно готов пойти на переговоры.`,
+      check: { skill: "Обман / Убеждение (Charisma)", dc: 14, description: "Переговоры с врагами" },
+      actions: [
+        "Попытаться склонить гоблинов к миру (Бросить D20)",
+        "Воспользоваться их замешательством и атаковать",
+        "Предложить им золото или сделку"
+      ]
     }
   ];
 
-  const picked = templates[Math.floor(Math.random() * templates.length)];
-  return {
-    narrative: picked.text,
-    checkRequired: picked.check,
-    suggestedActions: picked.actions
-  };
+  return responses[Math.floor(Math.random() * responses.length)];
 }
