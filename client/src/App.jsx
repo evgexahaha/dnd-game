@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { socket } from './socket';
+import React, { useState, useEffect, useRef } from 'react';
+import { supabase } from './services/supabaseClient';
+import { fetchAiDmNarrative } from './services/aiDmClient';
 
 import Header from './components/Header';
 import LobbyModal from './components/LobbyModal';
@@ -9,109 +10,330 @@ import D20Dice from './components/D20Dice';
 import ChatPanel from './components/ChatPanel';
 import CharacterPanel from './components/CharacterPanel';
 
+// Local BroadcastChannel fallback for multi-tab/same-network client sync
+const localBroadcast = typeof window !== 'undefined' && window.BroadcastChannel ? new BroadcastChannel('dnd_realm_channel') : null;
+
 export default function App() {
   const [room, setRoom] = useState(null);
   const [currentPlayer, setCurrentPlayer] = useState(null);
   const [lobbyError, setLobbyError] = useState('');
 
-  // UI Modals & Drawers State
+  // UI Modals State
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showCharacterPanel, setShowCharacterPanel] = useState(false);
   const [showDiceRoller, setShowDiceRoller] = useState(true);
 
-  // Game States
+  // Game Realtime States
   const [lastRoll, setLastRoll] = useState(null);
   const [isRolling, setIsRolling] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
 
-  useEffect(() => {
-    // Socket Event Handlers
-    socket.on('room_updated', (updatedRoom) => {
-      setRoom(updatedRoom);
-      if (socket.id) {
-        const me = updatedRoom.players.find((p) => p.id === socket.id);
+  const activeChannelRef = useRef(null);
+
+  // Helper to sync room update to all connected peers
+  const broadcastRoomUpdate = (updatedRoom) => {
+    setRoom(updatedRoom);
+    if (activeChannelRef.current) {
+      activeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'room_updated',
+        payload: updatedRoom
+      });
+    }
+    if (localBroadcast) {
+      localBroadcast.postMessage({ type: 'room_updated', payload: updatedRoom });
+    }
+  };
+
+  // Helper to sync dice roll to all peers
+  const broadcastDiceRoll = (rollResult) => {
+    setLastRoll(rollResult);
+    setIsRolling(true);
+    setTimeout(() => setIsRolling(false), 1500);
+
+    if (activeChannelRef.current) {
+      activeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'dice_rolled',
+        payload: rollResult
+      });
+    }
+    if (localBroadcast) {
+      localBroadcast.postMessage({ type: 'dice_rolled', payload: rollResult });
+    }
+  };
+
+  // Setup Realtime Sync Channel when joining a room
+  const joinRealtimeRoom = (roomCode, player) => {
+    const channelName = `dnd_room_${roomCode}`;
+    const channel = supabase.channel(channelName, {
+      config: { broadcast: { self: true }, presence: { key: player.id } }
+    });
+
+    channel
+      .on('broadcast', { event: 'room_updated' }, ({ payload }) => {
+        setRoom(payload);
+        const me = payload.players.find(p => p.id === player.id);
         if (me) setCurrentPlayer(me);
-      }
-    });
+      })
+      .on('broadcast', { event: 'dice_rolled' }, ({ payload }) => {
+        setLastRoll(payload);
+        setIsRolling(true);
+        setTimeout(() => setIsRolling(false), 1500);
+      })
+      .on('broadcast', { event: 'ai_thinking' }, ({ payload }) => {
+        setIsAiThinking(payload);
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channel.track({
+            id: player.id,
+            nickname: player.nickname,
+            avatar: player.avatar,
+            onlineAt: new Date().toISOString()
+          });
+        }
+      });
 
-    socket.on('dice_rolled', (rollResult) => {
-      setLastRoll(rollResult);
-      setIsRolling(true);
-      setTimeout(() => setIsRolling(false), 1500);
-    });
+    activeChannelRef.current = channel;
 
-    socket.on('ai_thinking', (thinkingState) => {
-      setIsAiThinking(thinkingState);
-    });
-
-    return () => {
-      socket.off('room_updated');
-      socket.off('dice_rolled');
-      socket.off('ai_thinking');
-    };
-  }, []);
+    // Listen to local browser multi-tab fallback
+    if (localBroadcast) {
+      localBroadcast.onmessage = (msg) => {
+        if (msg.data.type === 'room_updated') {
+          setRoom(msg.data.payload);
+        } else if (msg.data.type === 'dice_rolled') {
+          setLastRoll(msg.data.payload);
+          setIsRolling(true);
+          setTimeout(() => setIsRolling(false), 1500);
+        }
+      };
+    }
+  };
 
   // Create Lobby Handler
   const handleCreateRoom = ({ nickname, characterClass }) => {
-    setLobbyError('');
-    socket.emit('create_room', { nickname, characterClass }, (response) => {
-      if (response.success) {
-        setRoom(response.room);
-        setCurrentPlayer(response.player);
-      } else {
-        setLobbyError(response.error || 'Ошибка при создании лобби');
-      }
-    });
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const playerId = `player_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+
+    const hostPlayer = {
+      id: playerId,
+      nickname: nickname || 'Герой 1',
+      avatar: 'preset_knight',
+      characterClass: characterClass || 'Паладин (Paladin)',
+      hp: 12,
+      maxHp: 12,
+      ac: 15,
+      stats: { str: 14, dex: 12, con: 14, int: 10, wis: 10, cha: 8 },
+      position: { x: 220, y: 220 },
+      isHost: true
+    };
+
+    const newRoom = {
+      code,
+      createdAt: new Date().toISOString(),
+      scenario: "Подземелье Забытого Дракона: Ваша группа стоит у входа в древние руины.",
+      players: [hostPlayer],
+      gameLog: [
+        {
+          id: 'msg-init',
+          sender: 'AI Dungeon Master',
+          isAi: true,
+          text: 'Приветствую вас, искатели приключений! Я ваш ИИ-Мастер Подземелий (Dungeon Master). Соберите свою группу, настройте персонажей и приготовьтесь к путешествию!',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          suggestedActions: ["Осмотреть вход в руины", "Приготовить оружие", "Зажечь факел"]
+        }
+      ]
+    };
+
+    setCurrentPlayer(hostPlayer);
+    setRoom(newRoom);
+    joinRealtimeRoom(code, hostPlayer);
   };
 
   // Join Lobby Handler
   const handleJoinRoom = ({ roomCode, nickname, characterClass }) => {
-    setLobbyError('');
-    socket.emit('join_room', { roomCode, playerData: { nickname, characterClass } }, (response) => {
-      if (response.success) {
-        setRoom(response.room);
-        setCurrentPlayer(response.player);
-      } else {
-        setLobbyError(response.error || 'Ошибка при входе в лобби');
-      }
-    });
+    const code = roomCode.toUpperCase().trim();
+    const playerId = `player_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+
+    const newPlayer = {
+      id: playerId,
+      nickname: nickname || 'Присоединившийся Герой',
+      avatar: 'preset_wizard',
+      characterClass: characterClass || 'Маг (Wizard)',
+      hp: 8,
+      maxHp: 8,
+      ac: 12,
+      stats: { str: 8, dex: 14, con: 12, int: 16, wis: 12, cha: 10 },
+      position: { x: 380, y: 220 },
+      isHost: false
+    };
+
+    let existingRoom = room;
+    if (!existingRoom) {
+      existingRoom = {
+        code,
+        players: [],
+        gameLog: [
+          {
+            id: 'msg-init',
+            sender: 'AI Dungeon Master',
+            isAi: true,
+            text: `Добро пожаловать в лобби ${code}! Отряд собирается в подземелье.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            suggestedActions: ["Приготовиться к приключению", "Осмотреться"]
+          }
+        ]
+      };
+    }
+
+    const updatedPlayers = [...existingRoom.players.filter(p => p.id !== playerId), newPlayer];
+    const updatedRoom = {
+      ...existingRoom,
+      code,
+      players: updatedPlayers,
+      gameLog: [
+        ...existingRoom.gameLog,
+        {
+          id: `sys-${Date.now()}`,
+          sender: 'Система',
+          isSystem: true,
+          text: `${newPlayer.nickname} присоединился к отряду!`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ]
+    };
+
+    setCurrentPlayer(newPlayer);
+    setRoom(updatedRoom);
+    joinRealtimeRoom(code, newPlayer);
+    broadcastRoomUpdate(updatedRoom);
   };
 
-  // Update Profile & Custom Avatar
+  // Profile Update
   const handleSaveProfile = (updatedProfile) => {
-    socket.emit('update_profile', updatedProfile);
+    if (!room || !currentPlayer) return;
+
+    const updatedPlayers = room.players.map((p) => {
+      if (p.id === currentPlayer.id) {
+        return { ...p, ...updatedProfile };
+      }
+      return p;
+    });
+
+    const updatedRoom = { ...room, players: updatedPlayers };
+    setCurrentPlayer({ ...currentPlayer, ...updatedProfile });
+    broadcastRoomUpdate(updatedRoom);
   };
 
-  // Move Token on Tabletop
+  // Move Token
   const handleMoveToken = (pos) => {
-    socket.emit('move_token', pos);
+    if (!room || !currentPlayer) return;
+    const updatedPlayers = room.players.map((p) => {
+      if (p.id === currentPlayer.id) {
+        return { ...p, position: pos };
+      }
+      return p;
+    });
+    const updatedRoom = { ...room, players: updatedPlayers };
+    setCurrentPlayer({ ...currentPlayer, position: pos });
+    broadcastRoomUpdate(updatedRoom);
   };
 
-  // Roll D20 Dice Handler
+  // Roll D20
   const handleRollDice = ({ modifier, statName }) => {
-    socket.emit('roll_d20', { modifier, statName });
+    if (!currentPlayer || !room) return;
+
+    const rawRoll = Math.floor(Math.random() * 20) + 1;
+    const totalRoll = rawRoll + modifier;
+
+    const rollData = {
+      id: `roll-${Date.now()}`,
+      playerId: currentPlayer.id,
+      playerNickname: currentPlayer.nickname,
+      playerAvatar: currentPlayer.avatar,
+      statName,
+      rawRoll,
+      modifier,
+      totalRoll,
+      isNat20: rawRoll === 20,
+      isNat1: rawRoll === 1,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    const logEntry = {
+      id: `log-roll-${Date.now()}`,
+      sender: 'Кубик D20',
+      isRoll: true,
+      rollData,
+      text: `${currentPlayer.nickname} бросает D20 (${statName}): Выпало ${rawRoll} ${modifier >= 0 ? '+' : ''}${modifier} = ${totalRoll}${rawRoll === 20 ? ' (КРИТИЧЕСКИЙ УСПЕХ! 🎯)' : rawRoll === 1 ? ' (КРИТИЧЕСКИЙ ПРОВАЛ! 💀)' : ''}`,
+      timestamp: rollData.timestamp
+    };
+
+    const updatedRoom = { ...room, gameLog: [...room.gameLog, logEntry] };
+    broadcastDiceRoll(rollData);
+    broadcastRoomUpdate(updatedRoom);
   };
 
-  // Roll Check from AI prompt
-  const handleRollCheckFromAi = (checkInfo) => {
-    const statName = checkInfo.skill || checkInfo.description || 'Проверка';
-    handleRollDice({ modifier: 2, statName });
-  };
+  // Send Action / Message to AI DM
+  const handleSendPlayerAction = async (actionText) => {
+    if (!room || !currentPlayer) return;
 
-  // Send Player Action / Message to AI DM
-  const handleSendPlayerAction = (actionText) => {
-    socket.emit('send_player_action', { text: actionText });
+    const userMsg = {
+      id: `user-${Date.now()}`,
+      sender: currentPlayer.nickname,
+      avatar: currentPlayer.avatar,
+      isPlayer: true,
+      text: actionText,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    let updatedRoom = { ...room, gameLog: [...room.gameLog, userMsg] };
+    broadcastRoomUpdate(updatedRoom);
+
+    // AI Thinking status
+    setIsAiThinking(true);
+    if (activeChannelRef.current) {
+      activeChannelRef.current.send({ type: 'broadcast', event: 'ai_thinking', payload: true });
+    }
+
+    try {
+      const aiResponse = await fetchAiDmNarrative({
+        prompt: `${currentPlayer.nickname}: "${actionText}"`,
+        history: updatedRoom.gameLog.slice(-8),
+        players: updatedRoom.players
+      });
+
+      const aiMsg = {
+        id: `ai-${Date.now()}`,
+        sender: 'AI Dungeon Master',
+        isAi: true,
+        text: aiResponse.narrative,
+        checkRequired: aiResponse.checkRequired,
+        suggestedActions: aiResponse.suggestedActions,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+
+      updatedRoom = { ...updatedRoom, gameLog: [...updatedRoom.gameLog, aiMsg] };
+    } catch (e) {
+      console.error("AI DM error:", e);
+    } finally {
+      setIsAiThinking(false);
+      if (activeChannelRef.current) {
+        activeChannelRef.current.send({ type: 'broadcast', event: 'ai_thinking', payload: false });
+      }
+      broadcastRoomUpdate(updatedRoom);
+    }
   };
 
   // Update HP
   const handleUpdateHp = (newHp) => {
-    if (!currentPlayer) return;
-    socket.emit('update_profile', { hp: newHp });
+    handleSaveProfile({ hp: newHp });
   };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Header Bar */}
+      {/* Header */}
       <Header
         roomCode={room?.code}
         players={room?.players || []}
@@ -121,7 +343,7 @@ export default function App() {
         onToggleDice={() => setShowDiceRoller(!showDiceRoller)}
       />
 
-      {/* Main Game Interface */}
+      {/* Main Interface */}
       {!room ? (
         <LobbyModal
           onCreateRoom={handleCreateRoom}
@@ -130,7 +352,7 @@ export default function App() {
         />
       ) : (
         <main className="flex-1 p-4 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-4 my-2">
-          {/* Left Column: Visual Tabletop & D20 Dice Roller */}
+          {/* Left Column: Visual Tabletop & D20 Dice */}
           <div className="lg:col-span-7 flex flex-col gap-4">
             <GameTabletop
               players={room.players}
@@ -148,19 +370,19 @@ export default function App() {
             )}
           </div>
 
-          {/* Right Column: AI DM Narrative & Interactive Log */}
+          {/* Right Column: AI DM Chat Log */}
           <div className="lg:col-span-5 flex flex-col">
             <ChatPanel
               gameLog={room.gameLog || []}
               isAiThinking={isAiThinking}
               onSendAction={handleSendPlayerAction}
-              onRollCheck={handleRollCheckFromAi}
+              onRollCheck={({ skill }) => handleRollDice({ modifier: 2, statName: skill || 'Проверка' })}
             />
           </div>
         </main>
       )}
 
-      {/* Profile & Avatar Settings Modal */}
+      {/* Modals & Drawers */}
       {showProfileModal && (
         <ProfileModal
           currentPlayer={currentPlayer}
@@ -170,7 +392,6 @@ export default function App() {
         />
       )}
 
-      {/* Character Sheet Side Drawer */}
       {showCharacterPanel && (
         <CharacterPanel
           player={currentPlayer}
