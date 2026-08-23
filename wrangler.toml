@@ -1,0 +1,8 @@
+name = "dnd-game"
+compatibility_date = "2026-08-23"
+
+[assets]
+directory = "./client/dist"
+
+[build]
+command = "npm run install-all && npm run build"
