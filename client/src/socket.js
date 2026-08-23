@@ -1,15 +1,12 @@
 import { io } from 'socket.io-client';
 
-// Get custom server URL from localStorage if set (e.g. for static hosting on Cloudflare/GitHub Pages)
 const storedServerUrl = typeof window !== 'undefined' ? localStorage.getItem('dnd_server_url') : null;
-const defaultUrl = process.env.NODE_ENV === 'production' ? window.location.origin : 'http://localhost:3000';
-const targetUrl = storedServerUrl || defaultUrl;
 
-export const socket = io(targetUrl, {
-  autoConnect: true,
-  transports: ['websocket', 'polling'],
-  reconnectionAttempts: 5,
-  timeout: 10000
+// Disable autoConnect by default on static hosts to prevent console error spam
+export const socket = io(storedServerUrl || 'http://localhost:3000', {
+  autoConnect: !!storedServerUrl,
+  reconnection: false,
+  transports: ['websocket', 'polling']
 });
 
 export function reconnectSocket(newUrl) {
