@@ -1,10 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Plus, LogIn, Sparkles, Sword, Crown } from 'lucide-react';
+import { Shield, Plus, LogIn, Sparkles, Sword, Crown, Server, AlertCircle } from 'lucide-react';
+import { socket, reconnectSocket } from '../socket';
 
 export default function LobbyModal({ onCreateRoom, onJoinRoom, error }) {
   const [roomInput, setRoomInput] = useState('');
   const [nickname, setNickname] = useState('Искатель Приключений');
   const [characterClass, setCharacterClass] = useState('Паладин (Paladin)');
+  const [isConnected, setIsConnected] = useState(socket.connected);
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [customServerUrl, setCustomServerUrl] = useState(localStorage.getItem('dnd_server_url') || '');
+
+  useEffect(() => {
+    function onConnect() { setIsConnected(true); }
+    function onDisconnect() { setIsConnected(false); }
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+    };
+  }, []);
 
   // Read URL query parameters for direct invite link support (?room=XXXXXX)
   useEffect(() => {
@@ -26,6 +43,11 @@ export default function LobbyModal({ onCreateRoom, onJoinRoom, error }) {
     onJoinRoom({ roomCode: roomInput.trim().toUpperCase(), nickname, characterClass });
   };
 
+  const handleSaveServerUrl = (e) => {
+    e.preventDefault();
+    reconnectSocket(customServerUrl.trim());
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md">
       <div className="w-full max-w-lg glass-panel-gold rounded-2xl p-6 sm:p-8 border border-amber-500/40 shadow-2xl relative overflow-hidden">
@@ -45,6 +67,46 @@ export default function LobbyModal({ onCreateRoom, onJoinRoom, error }) {
           </h2>
           <p className="text-xs text-slate-400 mt-1">Мультиплеерная D&D игра с Ведущим ИИ</p>
         </div>
+
+        {/* Server Connection Disconnect Banner */}
+        {!isConnected && (
+          <div className="mb-4 p-3 rounded-xl bg-amber-950/80 border border-amber-500/50 text-amber-200 text-xs">
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-1.5 font-bold">
+                <AlertCircle className="w-4 h-4 text-amber-400" />
+                <span>Подключение к бэкенд-серверу...</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowServerConfig(!showServerConfig)}
+                className="text-[10px] text-amber-400 underline font-semibold"
+              >
+                {showServerConfig ? 'Скрыть' : 'Указать адрес бэкенда'}
+              </button>
+            </div>
+            <p className="text-[11px] text-amber-300/80">
+              Если фронтенд размещен на статической платформе, укажите адрес вашего запущеного бэкенд-сервера.
+            </p>
+
+            {showServerConfig && (
+              <form onSubmit={handleSaveServerUrl} className="mt-2.5 flex gap-2">
+                <input
+                  type="text"
+                  value={customServerUrl}
+                  onChange={(e) => setCustomServerUrl(e.target.value)}
+                  placeholder="http://localhost:3000 или URL бэкенда"
+                  className="flex-1 bg-slate-950 border border-amber-500/40 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500"
+                />
+                <button
+                  type="submit"
+                  className="px-3 py-1 bg-amber-500 text-slate-950 rounded-lg font-bold text-xs"
+                >
+                  Переподключить
+                </button>
+              </form>
+            )}
+          </div>
+        )}
 
         {/* Error Notification */}
         {error && (
