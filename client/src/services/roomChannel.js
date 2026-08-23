@@ -1,115 +1,111 @@
 /**
  * Multiplayer via PubNub — free public demo keys, zero registration required.
- * Works on Vercel (pure client-side), no backend needed.
- * Demo keys allow ~100 connections simultaneously — perfect for a friend group.
+ * All messages delivered to ALL subscribers including sender (PubNub behavior).
+ * We filter our own messages by senderId.
  */
 
 import PubNub from 'pubnub';
 
-// PubNub public demo sandbox keys — documented at pubnub.com/docs, no account needed
-const PUBNUB_PUBLISH_KEY  = 'demo';
+const PUBNUB_PUBLISH_KEY   = 'demo';
 const PUBNUB_SUBSCRIBE_KEY = 'demo';
 
-let _pn = null;
-let _activeChannel = null;
+let _pn       = null;
+let _channel  = null;
+let _myId     = null;
 let _handlers = {};
-let _myUuid = null;
+let _bc       = null;
 
 function getPubNub(uuid) {
   if (_pn) return _pn;
   _pn = new PubNub({
-    publishKey: PUBNUB_PUBLISH_KEY,
-    subscribeKey: PUBNUB_SUBSCRIBE_KEY,
-    uuid: uuid,
-    ssl: true,
-    restore: true,
+    publishKey:        PUBNUB_PUBLISH_KEY,
+    subscribeKey:      PUBNUB_SUBSCRIBE_KEY,
+    uuid:              uuid,
+    ssl:               true,
+    restore:           true,
     heartbeatInterval: 20,
-    suppressLeaveEvents: false,
   });
   return _pn;
 }
 
+// Public channel object returned to App.jsx
+let _channelObj = null;
+
 export function joinRoom(roomCode, playerId) {
-  _myUuid = playerId;
-  _activeChannel = `dnd_realm_${roomCode}`;
+  _myId    = playerId;
+  _channel = `dnd_realm_v2_${roomCode}`;
   _handlers = {};
+
+  // Teardown previous
+  if (_pn) {
+    try { _pn.removeAllListeners(); _pn.unsubscribeAll(); } catch (_) {}
+    _pn = null;
+  }
+  if (_bc) { try { _bc.close(); } catch (_) {} _bc = null; }
 
   const pn = getPubNub(playerId);
 
-  // Remove any existing listeners
-  pn.removeAllListeners?.();
-
   pn.addListener({
     message: ({ channel, message }) => {
-      if (channel !== _activeChannel) return;
-      const { event, payload, senderId } = message || {};
-      // Don't echo to self
-      if (senderId === playerId) return;
-      if (event && _handlers[event]) {
-        _handlers[event](payload);
-      }
-    },
-    presence: ({ action, uuid }) => {
-      if (_handlers['presence']) {
-        _handlers['presence']({ action, uuid });
-      }
+      if (channel !== _channel) return;
+      const { event, payload, from } = message || {};
+      // Ignore our own PubNub echo (PubNub sends to all including sender)
+      if (from === playerId) return;
+      const h = _handlers[event];
+      if (h) h(payload);
     },
     status: ({ category }) => {
       if (category === 'PNConnectedCategory') {
-        console.log(`[Multiplayer] PubNub connected to room ${roomCode} ✓`);
+        console.log(`[MP] PubNub connected ✓ room=${roomCode} me=${playerId}`);
       }
     }
   });
 
-  pn.subscribe({
-    channels: [_activeChannel],
-    withPresence: true
-  });
+  pn.subscribe({ channels: [_channel], withPresence: false });
 
-  // BroadcastChannel for same-browser tabs (instant sync)
-  let bc = null;
+  // BroadcastChannel for same-browser cross-tab (instant, no network)
   try {
-    bc = new BroadcastChannel(`dnd_room_${roomCode}`);
-    bc.onmessage = (e) => {
-      const { event, payload } = e.data || {};
-      if (event && _handlers[event]) _handlers[event](payload);
+    _bc = new BroadcastChannel(`dnd_v2_${roomCode}`);
+    _bc.onmessage = ({ data }) => {
+      if (!data || data.from === playerId) return; // ignore own BC echo
+      const h = _handlers[data.event];
+      if (h) h(data.payload);
     };
   } catch (_) {}
 
-  return {
+  _channelObj = {
     on(event, handler) {
       _handlers[event] = handler;
       return this;
     },
     send(event, payload) {
-      // PubNub publish
-      pn.publish({
-        channel: _activeChannel,
-        message: { event, payload, senderId: playerId },
-      }).catch(e => console.warn('[PubNub publish error]', e));
-
-      // BroadcastChannel (same browser instant)
-      if (bc) {
-        try { bc.postMessage({ event, payload }); } catch (_) {}
+      const msg = { event, payload, from: playerId };
+      // PubNub (cross-device)
+      pn.publish({ channel: _channel, message: msg })
+        .catch(e => console.warn('[PubNub]', e.message || e));
+      // BroadcastChannel (same browser, instant)
+      if (_bc) {
+        try { _bc.postMessage(msg); } catch (_) {}
       }
     },
     destroy() {
-      pn.unsubscribe({ channels: [_activeChannel] });
-      if (bc) { try { bc.close(); } catch (_) {} }
+      try { pn.removeAllListeners(); pn.unsubscribeAll(); } catch (_) {}
+      if (_bc) { try { _bc.close(); } catch (_) {} _bc = null; }
       _handlers = {};
-      _activeChannel = null;
+      _channel  = null;
+      _myId     = null;
+      _pn       = null;
+      _channelObj = null;
     }
   };
+
+  return _channelObj;
 }
 
 export function leaveRoom() {
-  if (_pn && _activeChannel) {
-    _pn.unsubscribe({ channels: [_activeChannel] });
-  }
-  _activeChannel = null;
-  _handlers = {};
+  if (_channelObj) _channelObj.destroy();
 }
 
-// Kept for compatibility — no Supabase needed
+// Stubs — no Supabase needed
 export function saveSupabaseCredentials() {}
 export function getIsSupabaseConfigured() { return true; }

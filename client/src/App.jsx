@@ -67,7 +67,10 @@ export default function App() {
   const [isRolling, setIsRolling] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
 
-  const channelRef = useRef(null);
+  const channelRef  = useRef(null);
+  const heartbeatRef = useRef(null); // interval for sending own presence
+  const currentPlayerRef = useRef(null); // mirror of currentPlayer for closures
+  useEffect(() => { currentPlayerRef.current = currentPlayer; }, [currentPlayer]);
 
   // Save account changes both to state & localStorage
   const updateAccountProfile = (updatedData) => {
@@ -116,6 +119,21 @@ export default function App() {
     }
   };
 
+  // Start heartbeat — each player announces themselves every 4s
+  // This way late-joiners discover all players without a dedicated sync
+  const startHeartbeat = (player) => {
+    if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    heartbeatRef.current = setInterval(() => {
+      if (channelRef.current) {
+        channelRef.current.send('heartbeat', currentPlayerRef.current || player);
+      }
+    }, 4000);
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
+  };
+
   // Broadcast dice roll to all peers
   const broadcastDiceRoll = (rollData) => {
     setLastRoll(rollData);
@@ -129,28 +147,58 @@ export default function App() {
   // Connect to room channel and wire up all sync events
   const joinRealtimeRoom = (roomCode, player) => {
     if (channelRef.current) channelRef.current.destroy();
+    stopHeartbeat();
     const ch = joinRoom(roomCode, player.id);
 
-    // Full room state received — smart-merge players so nobody gets erased
+    // ── room_updated: smart-merge so no player is ever lost ─────────────────
     ch.on('room_updated', (payload) => {
       if (!payload) return;
       setRoom(prev => {
         if (!prev) return payload;
         const mergedPlayers = mergePlayers(prev.players, payload.players);
-        // Merge gameLogs — keep unique by id
         const logMap = new Map();
         [...(prev.gameLog || []), ...(payload.gameLog || [])].forEach(l => logMap.set(l.id, l));
         const mergedLog = Array.from(logMap.values()).sort((a, b) => a.id.localeCompare(b.id));
-        return { ...prev, ...payload, players: mergedPlayers, gameLog: mergedLog };
+        const merged = { ...prev, ...payload, players: mergedPlayers, gameLog: mergedLog };
+        roomRef.current = merged;
+        return merged;
       });
-      // Update own currentPlayer data if it changed
       setCurrentPlayer(prev => {
         const me = payload?.players?.find(p => p.id === player.id);
         return me ? { ...prev, ...me } : prev;
       });
     });
 
-    // Someone new joined — add them to our local room & re-broadcast for them
+    // ── heartbeat: someone announced their presence ──────────────────────────
+    // Merge them in + if we have more players they don't know about, send back room_updated
+    ch.on('heartbeat', (remotePlayer) => {
+      if (!remotePlayer || remotePlayer.id === player.id) return;
+      setRoom(prev => {
+        if (!prev) return null;
+        const alreadyIn = prev.players.some(p => p.id === remotePlayer.id);
+        const players = alreadyIn
+          ? prev.players.map(p => p.id === remotePlayer.id ? { ...p, ...remotePlayer } : p)
+          : [...prev.players, remotePlayer];
+        const joinMsgs = alreadyIn ? [] : [{
+          id: `sys-hb-${remotePlayer.id}`,
+          sender: 'Система',
+          isSystem: true,
+          text: `${remotePlayer.nickname} в отряде!`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }];
+        const merged = { ...prev, players, gameLog: [...prev.gameLog, ...joinMsgs] };
+        roomRef.current = merged;
+        // If the remote player wasn't here yet, send them the full room so they see us
+        if (!alreadyIn) {
+          setTimeout(() => {
+            if (channelRef.current) channelRef.current.send('room_updated', merged);
+          }, 200);
+        }
+        return merged;
+      });
+    });
+
+    // ── player_joined: explicit join announcement ────────────────────────────
     ch.on('player_joined', (newPlayer) => {
       if (!newPlayer || newPlayer.id === player.id) return;
       setRoom(prev => {
@@ -166,38 +214,29 @@ export default function App() {
           text: `${newPlayer.nickname} присоединился к отряду!`,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }];
-        const updated = { ...prev, players, gameLog: [...prev.gameLog, ...joinMsg] };
-        // Only broadcast back if I was here first (avoid ping-pong — only if I have more players)
-        if (prev.players.length >= 1) {
-          setTimeout(() => {
-            if (channelRef.current) channelRef.current.send('room_updated', updated);
-          }, 100);
-        }
-        return updated;
+        const merged = { ...prev, players, gameLog: [...prev.gameLog, ...joinMsg] };
+        roomRef.current = merged;
+        // Reply with full room so joiner sees all players
+        setTimeout(() => {
+          if (channelRef.current) channelRef.current.send('room_updated', merged);
+        }, 150);
+        return merged;
       });
     });
 
-    // Someone is asking for current state (new joiner requesting sync)
+    // ── request_sync: joiner asking for state ────────────────────────────────
     ch.on('request_sync', () => {
-      const current = roomRef.current;
-      if (current && channelRef.current) {
-        setTimeout(() => {
-          channelRef.current.send('room_updated', current);
-        }, 150);
+      const cur = roomRef.current;
+      if (cur && channelRef.current) {
+        setTimeout(() => channelRef.current?.send('room_updated', cur), 200);
       }
     });
 
-    ch.on('dice_rolled', (payload) => {
-      setLastRoll(payload);
-      setIsRolling(true);
-      setTimeout(() => setIsRolling(false), 1800);
-    });
-
-    ch.on('ai_thinking', (payload) => {
-      setIsAiThinking(!!payload);
-    });
+    ch.on('dice_rolled',  (p) => { setLastRoll(p); setIsRolling(true); setTimeout(() => setIsRolling(false), 1800); });
+    ch.on('ai_thinking',  (p) => { setIsAiThinking(!!p); });
 
     channelRef.current = ch;
+    startHeartbeat(player);
   };
 
   // Create Lobby Handler
@@ -248,7 +287,6 @@ export default function App() {
       isHost: false
     };
 
-    // Set a local placeholder room while we wait for sync from host
     const placeholderRoom = {
       code,
       players: [joiningPlayer],
@@ -256,27 +294,32 @@ export default function App() {
         id: 'msg-join-init',
         sender: 'AI Dungeon Master',
         isAi: true,
-        text: `Подключение к лобби ${code}... Запрашиваем состояние у отряда.`,
+        text: `Подключение к лобби ${code}...`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         suggestedActions: []
       }]
     };
 
     setCurrentPlayer(joiningPlayer);
+    currentPlayerRef.current = joiningPlayer;
     setRoom(placeholderRoom);
     roomRef.current = placeholderRoom;
 
-    // 1. Connect to channel
+    // Connect to channel
     joinRealtimeRoom(code, joiningPlayer);
 
-    // 2. Announce ourselves so existing players add us
-    setTimeout(() => {
-      if (channelRef.current) {
-        channelRef.current.send('player_joined', joiningPlayer);
-        // 3. Request full current state from host
-        channelRef.current.send('request_sync', { requesterId: joiningPlayer.id });
-      }
-    }, 400);
+    // Send join announcements with retries — PubNub subscription may take a moment
+    const announce = () => {
+      if (!channelRef.current) return;
+      channelRef.current.send('player_joined', joiningPlayer);
+      channelRef.current.send('request_sync', { from: joiningPlayer.id });
+      // Also send own heartbeat immediately
+      channelRef.current.send('heartbeat', joiningPlayer);
+    };
+
+    setTimeout(announce, 500);   // First try
+    setTimeout(announce, 2000);  // Retry if PubNub was slow
+    setTimeout(announce, 5000);  // Final safety retry
   };
 
   // Move Token
