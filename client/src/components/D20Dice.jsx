@@ -12,7 +12,7 @@ function playDiceRollSound() {
       const g = ctx.createGain();
       osc.type = ['triangle', 'square', 'sine'][i % 3];
       osc.frequency.setValueAtTime(180 + Math.random() * 500, ctx.currentTime + i * 0.055);
-      g.gain.setValueAtTime(0.3, ctx.currentTime + i * 0.055);
+      g.gain.setValueAtTime(0.28, ctx.currentTime + i * 0.055);
       g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.055 + 0.06);
       osc.connect(g);
       g.connect(ctx.destination);
@@ -22,82 +22,260 @@ function playDiceRollSound() {
   } catch (_) {}
 }
 
-// The 6 standard D6-style faces for visual display, but with D20 values
-const FACE_NUMBERS = [20, 1, 8, 13, 5, 17];
+/**
+ * D20 Icosahedron rendered as SVG top-down view with 3D rotating canvas animation.
+ * Uses canvas-based icosahedron projection for real 3D look.
+ */
+function drawIcosahedron(canvas, rotX, rotY, roll, isNat20, isNat1) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  const cx = W / 2;
+  const cy = H / 2;
+  const R = Math.min(W, H) * 0.38;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Icosahedron vertices (unit sphere)
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const verts = [
+    [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+    [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+    [phi, 0, 1], [-phi, 0, 1], [phi, 0, -1], [-phi, 0, -1]
+  ].map(v => {
+    const len = Math.sqrt(v[0]**2 + v[1]**2 + v[2]**2);
+    return [v[0]/len, v[1]/len, v[2]/len];
+  });
+
+  // 20 triangular faces of icosahedron
+  const faces = [
+    [0,1,8],[0,8,4],[0,4,5],[0,5,9],[0,9,1],
+    [1,6,8],[8,6,10],[8,10,4],[4,10,2],[4,2,5],
+    [5,2,11],[5,11,9],[9,11,7],[9,7,1],[1,7,6],
+    [3,6,7],[3,7,11],[3,11,2],[3,2,10],[3,10,6]
+  ];
+
+  // 3D Rotation matrices
+  const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+  const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+
+  const rotate = ([x, y, z]) => {
+    // Rotate around Y
+    let nx = x * cosY + z * sinY;
+    let ny = y;
+    let nz = -x * sinY + z * cosY;
+    // Rotate around X
+    let fx = nx;
+    let fy = ny * cosX - nz * sinX;
+    let fz = ny * sinX + nz * cosX;
+    return [fx, fy, fz];
+  };
+
+  // Project 3D → 2D (simple perspective)
+  const project = ([x, y, z]) => {
+    const fov = 2.8;
+    const d = fov - z;
+    return [cx + (x * R * fov) / d, cy - (y * R * fov) / d, z];
+  };
+
+  // Compute rotated vertices + their projections
+  const rotVerts = verts.map(v => rotate(v));
+  const projVerts = rotVerts.map(v => project(v));
+
+  // Sort faces back-to-front (painter's algorithm)
+  const faceDepths = faces.map((f, i) => {
+    const z = (rotVerts[f[0]][2] + rotVerts[f[1]][2] + rotVerts[f[2]][2]) / 3;
+    return { i, z };
+  }).sort((a, b) => a.z - b.z);
+
+  // Color palette for faces
+  const faceColors = [
+    '#0f172a','#1e293b','#162032','#0d1b2a','#13253a',
+    '#1a2d40','#0a1628','#172236','#0e1e30','#162d40',
+    '#1b3050','#0f2035','#1a2840','#112035','#162540',
+    '#1e3045','#0a1e30','#18293c','#0d2035','#152840'
+  ];
+
+  // Draw faces
+  faceDepths.forEach(({ i, z }) => {
+    const f = faces[i];
+    const [ax, ay] = projVerts[f[0]];
+    const [bx, by] = projVerts[f[1]];
+    const [cx2, cy2] = projVerts[f[2]];
+
+    // Back-face culling — compute normal Z
+    const ex = bx - ax, ey = by - ay;
+    const fx2 = cx2 - ax, fy2 = cy2 - ay;
+    const nz = ex * fy2 - ey * fx2;
+    if (nz < 0) return; // back face
+
+    const brightness = Math.max(0, Math.min(1, (z + 1) / 2));
+    const isTop = i === 0; // front-most face shows the number
+
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.lineTo(cx2, cy2);
+    ctx.closePath();
+
+    // Fill color
+    let fillColor;
+    if (isNat20) {
+      fillColor = `rgba(${Math.round(180 + brightness * 75)}, ${Math.round(120 + brightness * 80)}, 0, 1)`;
+    } else if (isNat1) {
+      fillColor = `rgba(${Math.round(80 + brightness * 60)}, 0, 0, 1)`;
+    } else {
+      const b = Math.round(15 + brightness * 45);
+      const g = Math.round(20 + brightness * 55);
+      fillColor = `rgb(${b}, ${g}, ${Math.round(b * 2.5)})`;
+    }
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+
+    // Edge lines
+    ctx.strokeStyle = isNat20 ? `rgba(255, 200, 0, ${0.3 + brightness * 0.5})`
+      : isNat1 ? `rgba(255,50,50,${0.3 + brightness * 0.4})`
+      : `rgba(245, 158, 11, ${0.15 + brightness * 0.45})`;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  });
+
+  // Find top face and draw number
+  const topFace = faceDepths[faceDepths.length - 1];
+  const f = faces[topFace.i];
+  const [ax, ay] = projVerts[f[0]];
+  const [bx, by] = projVerts[f[1]];
+  const [cx2, cy2] = projVerts[f[2]];
+  const faceCx = (ax + bx + cx2) / 3;
+  const faceCy = (ay + by + cy2) / 3;
+
+  // Compute back-face for top
+  const ex = bx - ax, ey = by - ay;
+  const fx2 = cx2 - ax, fy2 = cy2 - ay;
+  const topNz = ex * fy2 - ey * fx2;
+
+  if (topNz >= 0) {
+    // Glow halo on top face
+    const grd = ctx.createRadialGradient(faceCx, faceCy, 0, faceCx, faceCy, R * 0.55);
+    if (isNat20) {
+      grd.addColorStop(0, 'rgba(255,220,50,0.55)');
+      grd.addColorStop(1, 'rgba(255,150,0,0)');
+    } else if (isNat1) {
+      grd.addColorStop(0, 'rgba(255,30,30,0.45)');
+      grd.addColorStop(1, 'rgba(120,0,0,0)');
+    } else {
+      grd.addColorStop(0, 'rgba(245,158,11,0.18)');
+      grd.addColorStop(1, 'rgba(245,158,11,0)');
+    }
+    ctx.beginPath();
+    ctx.arc(faceCx, faceCy, R * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = grd;
+    ctx.fill();
+
+    // Number text
+    const numStr = String(roll);
+    const fontSize = R * 0.45;
+    ctx.font = `900 ${fontSize}px Cinzel, serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = isNat20 ? '#fff' : isNat1 ? '#ff3333' : '#f59e0b';
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = isNat20 ? '#1c1917' : isNat1 ? '#fecaca' : '#fef08a';
+    ctx.fillText(numStr, faceCx, faceCy);
+    ctx.shadowBlur = 0;
+
+    // D20 label
+    ctx.font = `bold ${R * 0.18}px Cinzel, serif`;
+    ctx.fillStyle = isNat20 ? '#78350f88' : '#f59e0b55';
+    ctx.fillText('D20', faceCx, faceCy + fontSize * 0.75);
+  }
+
+  // Outer glow ring
+  const grad = ctx.createRadialGradient(cx, cy, R * 0.85, cx, cy, R * 1.2);
+  if (isNat20) {
+    grad.addColorStop(0, 'rgba(245,158,11,0.5)');
+    grad.addColorStop(1, 'rgba(245,158,11,0)');
+  } else if (isNat1) {
+    grad.addColorStop(0, 'rgba(239,68,68,0.5)');
+    grad.addColorStop(1, 'rgba(239,68,68,0)');
+  } else {
+    grad.addColorStop(0, 'rgba(245,158,11,0.18)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+  }
+  ctx.beginPath();
+  ctx.arc(cx, cy, R * 1.15, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+}
 
 export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
+  const canvasRef = useRef(null);
+  const animRef = useRef(null);
+  const rotRef = useRef({ x: 0.5, y: 0.3 });
+  const velRef = useRef({ x: 0.004, y: 0.007 });
   const [selectedStat, setSelectedStat] = useState('str');
   const [customMod, setCustomMod] = useState(0);
   const [localRolling, setLocalRolling] = useState(false);
   const [displayRoll, setDisplayRoll] = useState(20);
 
-  // 3D rotation state
-  const [rotX, setRotX] = useState(-20);
-  const [rotY, setRotY] = useState(30);
-  const animRef = useRef(null);
-  const startTimeRef = useRef(null);
-  const startRotRef = useRef({ x: -20, y: 30 });
-  const targetRotRef = useRef({ x: -20, y: 30 });
-  const idleRef = useRef(null);
-
   const computedStatMod = Math.floor(((stats[selectedStat] || 10) - 10) / 2);
   const totalModifier = computedStatMod + Number(customMod || 0);
   const rollingState = isRolling || localRolling;
 
-  // Idle slow rotation
+  const currentRoll = rollingState ? displayRoll : (lastRoll?.rawRoll ?? 20);
+  const isNat20 = !!lastRoll?.isNat20 && !rollingState;
+  const isNat1 = !!lastRoll?.isNat1 && !rollingState;
+
+  // Animation loop
   useEffect(() => {
     let frame;
-    let angle = 30;
-    const idle = () => {
-      if (!localRolling && !isRolling) {
-        angle += 0.4;
-        setRotX(-15 + Math.sin(angle * 0.008) * 12);
-        setRotY(angle % 360);
-      }
-      frame = requestAnimationFrame(idle);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const loop = () => {
+      rotRef.current.x += velRef.current.x;
+      rotRef.current.y += velRef.current.y;
+      drawIcosahedron(canvas, rotRef.current.x, rotRef.current.y, currentRoll, isNat20, isNat1);
+      frame = requestAnimationFrame(loop);
     };
-    frame = requestAnimationFrame(idle);
+
+    frame = requestAnimationFrame(loop);
+    animRef.current = frame;
     return () => cancelAnimationFrame(frame);
-  }, [localRolling, isRolling]);
-
-  const startRollAnimation = () => {
-    const startX = rotX;
-    const startY = rotY;
-    const endX = startX + (Math.random() > 0.5 ? 1 : -1) * (720 + Math.random() * 360);
-    const endY = startY + (Math.random() > 0.5 ? 1 : -1) * (1080 + Math.random() * 360);
-    const duration = 1600;
-    const start = performance.now();
-
-    const animate = (now) => {
-      const elapsed = now - start;
-      const t = Math.min(1, elapsed / duration);
-      // Ease out quintic
-      const ease = 1 - Math.pow(1 - t, 5);
-
-      setRotX(startX + (endX - startX) * ease);
-      setRotY(startY + (endY - startY) * ease);
-
-      if (t < 1) {
-        animRef.current = requestAnimationFrame(animate);
-      }
-    };
-    animRef.current = requestAnimationFrame(animate);
-  };
+  }, [currentRoll, isNat20, isNat1]);
 
   const handleRollClick = () => {
     if (rollingState) return;
     setLocalRolling(true);
     playDiceRollSound();
 
+    // Fast spin velocity on click
+    velRef.current = {
+      x: (Math.random() > 0.5 ? 1 : -1) * (0.08 + Math.random() * 0.08),
+      y: (Math.random() > 0.5 ? 1 : -1) * (0.10 + Math.random() * 0.10)
+    };
+
     // Flicker number
     let count = 0;
     const interval = setInterval(() => {
       setDisplayRoll(Math.floor(Math.random() * 20) + 1);
       count++;
-      if (count >= 20) clearInterval(interval);
-    }, 70);
+      if (count >= 22) clearInterval(interval);
+    }, 65);
 
-    startRollAnimation();
+    // Slow back down over 1.6s
+    const startTime = Date.now();
+    const startVel = { ...velRef.current };
+    const decel = () => {
+      const t = Math.min(1, (Date.now() - startTime) / 1600);
+      const ease = 1 - Math.pow(1 - t, 3);
+      velRef.current = {
+        x: startVel.x * (1 - ease) + 0.004 * ease,
+        y: startVel.y * (1 - ease) + 0.007 * ease,
+      };
+      if (t < 1) requestAnimationFrame(decel);
+    };
+    requestAnimationFrame(decel);
 
     setTimeout(() => {
       setLocalRolling(false);
@@ -111,107 +289,37 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
 
   useEffect(() => {
     if (lastRoll) {
-      setDisplayRoll(lastRoll.rawRoll);
-      if (lastRoll.isNat20) {
-        confetti({ particleCount: 180, spread: 100, origin: { y: 0.6 } });
-      }
+      if (lastRoll.isNat20) confetti({ particleCount: 180, spread: 100, origin: { y: 0.6 } });
     }
   }, [lastRoll]);
 
-  const isNat20 = lastRoll?.isNat20 && !rollingState;
-  const isNat1 = lastRoll?.isNat1 && !rollingState;
-
-  // Face colors based on result
-  const faceColor = isNat20
-    ? { bg: 'from-yellow-400 to-amber-500', border: '#fbbf24', text: '#1c1917', shadow: '0 0 40px #f59e0b' }
-    : isNat1
-    ? { bg: 'from-red-900 to-rose-950', border: '#ef4444', text: '#fecaca', shadow: '0 0 40px #ef4444' }
-    : { bg: 'from-slate-800 to-slate-950', border: '#f59e0b', text: '#fef08a', shadow: '0 0 20px rgba(245,158,11,0.3)' };
-
-  const faceStyle = (n) => ({
-    background: isNat20
-      ? 'linear-gradient(135deg, #f59e0b, #fbbf24)'
-      : isNat1
-      ? 'linear-gradient(135deg, #450a0a, #9f1239)'
-      : n === 1
-      ? 'linear-gradient(135deg, #0f172a, #1e293b)'
-      : 'linear-gradient(135deg, #1e293b, #0f172a)',
-    border: `1.5px solid ${faceColor.border}44`,
-    color: faceColor.text,
-    fontSize: n === 0 ? '28px' : '16px',
-    fontWeight: 900,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'absolute',
-    width: '120px',
-    height: '120px',
-    backfaceVisibility: 'hidden',
-    userSelect: 'none',
-    fontFamily: 'Cinzel, serif',
-    boxShadow: `inset 0 0 20px rgba(0,0,0,0.5), inset 0 0 5px ${faceColor.border}33`,
-  });
-
-  const sz = 60; // half of 120px cube
-
   return (
     <div className="bg-slate-900/90 rounded-2xl border border-amber-500/30 p-4 shadow-xl backdrop-blur-md select-none">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-amber-500/20 pb-3 mb-4">
+      <div className="flex items-center justify-between border-b border-amber-500/20 pb-3 mb-3">
         <div className="flex items-center gap-2">
           <Dice5 className="w-5 h-5 text-amber-400" />
-          <h3 className="font-cinzel text-sm font-bold text-amber-300">3D D20 Кубик</h3>
+          <h3 className="font-cinzel text-sm font-bold text-amber-300">3D Икосаэдр D20</h3>
         </div>
-        <span className="text-[10px] text-amber-400/80 font-mono">CSS 3D · Вращается</span>
+        <span className="text-[10px] text-amber-400/80 font-mono">20 граней · WebGL Canvas</span>
       </div>
 
-      {/* 3D Dice Scene */}
-      <div
-        className="cursor-pointer flex flex-col items-center justify-center mb-4"
-        style={{ height: 180, perspective: '600px' }}
-        onClick={handleRollClick}
-      >
-        <div
-          style={{
-            width: 120,
-            height: 120,
-            position: 'relative',
-            transformStyle: 'preserve-3d',
-            transform: `rotateX(${rotX}deg) rotateY(${rotY}deg)`,
-            transition: rollingState ? 'none' : 'transform 0.05s linear',
-            filter: `drop-shadow(${faceColor.shadow})`,
-          }}
-        >
-          {/* Front face — shows current roll */}
-          <div style={{ ...faceStyle(0), transform: `translateZ(${sz}px)` }}>
-            <div style={{ textAlign: 'center', lineHeight: 1 }}>
-              <div style={{ fontSize: 38, fontWeight: 900, color: isNat20 ? '#1c1917' : '#fef08a' }}>
-                {rollingState ? displayRoll : lastRoll ? lastRoll.rawRoll : 20}
-              </div>
-              <div style={{ fontSize: 10, color: isNat20 ? '#78350f' : '#f59e0b66', letterSpacing: 3, marginTop: 2 }}>D20</div>
-            </div>
-          </div>
-          {/* Back */}
-          <div style={{ ...faceStyle(1), transform: `rotateY(180deg) translateZ(${sz}px)` }}>1</div>
-          {/* Right */}
-          <div style={{ ...faceStyle(2), transform: `rotateY(90deg) translateZ(${sz}px)` }}>8</div>
-          {/* Left */}
-          <div style={{ ...faceStyle(3), transform: `rotateY(-90deg) translateZ(${sz}px)` }}>13</div>
-          {/* Top */}
-          <div style={{ ...faceStyle(4), transform: `rotateX(90deg) translateZ(${sz}px)` }}>5</div>
-          {/* Bottom */}
-          <div style={{ ...faceStyle(5), transform: `rotateX(-90deg) translateZ(${sz}px)` }}>17</div>
-        </div>
-
-        {/* Click hint */}
-        <p className="text-[10px] text-amber-400/50 mt-2">
+      {/* 3D Canvas */}
+      <div className="flex flex-col items-center cursor-pointer" onClick={handleRollClick}>
+        <canvas
+          ref={canvasRef}
+          width={220}
+          height={220}
+          className="rounded-xl"
+          style={{ imageRendering: 'pixelated' }}
+        />
+        <p className="text-[10px] text-amber-400/50 mt-1">
           {rollingState ? '⟳ Вращается...' : '← Нажмите для броска →'}
         </p>
       </div>
 
-      {/* Roll Result Banner */}
+      {/* Roll Result */}
       {lastRoll && !rollingState && (
-        <div className={`mb-4 p-3 rounded-xl text-center border ${isNat20 ? 'bg-amber-500/20 border-amber-400' : isNat1 ? 'bg-red-950/50 border-red-500' : 'bg-slate-950 border-amber-500/30'}`}>
+        <div className={`my-3 p-3 rounded-xl text-center border ${isNat20 ? 'bg-amber-500/20 border-amber-400' : isNat1 ? 'bg-red-950/50 border-red-500' : 'bg-slate-950 border-amber-500/30'}`}>
           <div className="flex items-center justify-center gap-2 text-xs font-bold text-slate-200">
             <span>{lastRoll.playerNickname}:</span>
             <span className="font-mono text-amber-400">
@@ -219,16 +327,8 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
               <strong className="text-yellow-300 text-sm">{lastRoll.totalRoll}</strong>
             </span>
           </div>
-          {isNat20 && (
-            <div className="mt-1 flex items-center justify-center gap-1 text-xs text-amber-400 font-bold">
-              <Sparkles className="w-3.5 h-3.5" /> КРИТИЧЕСКИЙ УСПЕХ! (Nat 20)
-            </div>
-          )}
-          {isNat1 && (
-            <div className="mt-1 flex items-center justify-center gap-1 text-xs text-red-400 font-bold">
-              <AlertTriangle className="w-3.5 h-3.5" /> КРИТИЧЕСКИЙ ПРОВАЛ! (Nat 1)
-            </div>
-          )}
+          {isNat20 && <div className="mt-1 flex items-center justify-center gap-1 text-xs text-amber-400 font-bold"><Sparkles className="w-3 h-3" /> КРИТИЧЕСКИЙ УСПЕХ!</div>}
+          {isNat1 && <div className="mt-1 flex items-center justify-center gap-1 text-xs text-red-400 font-bold"><AlertTriangle className="w-3 h-3" /> КРИТИЧЕСКИЙ ПРОВАЛ!</div>}
         </div>
       )}
 
@@ -237,11 +337,7 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label className="block text-[10px] text-slate-400 mb-1">Навык:</label>
-            <select
-              value={selectedStat}
-              onChange={(e) => setSelectedStat(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200"
-            >
+            <select value={selectedStat} onChange={(e) => setSelectedStat(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200">
               <option value="str">💪 Сила</option>
               <option value="dex">🏃 Ловкость</option>
               <option value="con">🛡️ Телосложение</option>
@@ -252,19 +348,13 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
           </div>
           <div>
             <label className="block text-[10px] text-slate-400 mb-1">Доп. мод:</label>
-            <input
-              type="number"
-              value={customMod}
-              onChange={(e) => setCustomMod(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-center text-amber-300 font-bold"
-            />
+            <input type="number" value={customMod} onChange={(e) => setCustomMod(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-center text-amber-300 font-bold" />
           </div>
         </div>
-
         <button
           onClick={handleRollClick}
           disabled={rollingState}
-          className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-600 via-amber-500 to-yellow-500 hover:brightness-110 text-slate-950 font-black font-cinzel text-sm shadow-lg shadow-amber-500/30 flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-60"
+          className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-600 via-amber-500 to-yellow-500 hover:brightness-110 text-slate-950 font-black font-cinzel text-sm shadow-lg shadow-amber-500/30 flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-60"
         >
           <Dice5 className={`w-5 h-5 ${rollingState ? 'animate-spin' : ''}`} />
           <span>{rollingState ? 'Бросок...' : `БРОСИТЬ D20 (${totalModifier >= 0 ? '+' : ''}${totalModifier})`}</span>

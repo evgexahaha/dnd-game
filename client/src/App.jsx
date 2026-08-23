@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { supabase } from './services/supabaseClient';
+import { joinRoom, leaveRoom, saveSupabaseCredentials, getIsSupabaseConfigured } from './services/roomChannel';
 import { fetchAiDmNarrative } from './services/aiDmClient';
 
 import Header from './components/Header';
@@ -9,6 +9,7 @@ import GameTabletop from './components/GameTabletop';
 import D20Dice from './components/D20Dice';
 import ChatPanel from './components/ChatPanel';
 import CharacterPanel from './components/CharacterPanel';
+import SupabaseSetup from './components/SupabaseSetup';
 
 const LOCAL_ACCOUNT_KEY = 'dnd_user_account_profile_v1';
 
@@ -47,8 +48,7 @@ function saveAccountToStorage(account) {
   }
 }
 
-// Local BroadcastChannel fallback for multi-tab sync
-const localBroadcast = typeof window !== 'undefined' && window.BroadcastChannel ? new BroadcastChannel('dnd_realm_channel') : null;
+
 
 export default function App() {
   // Persistent User Account Profile
@@ -62,13 +62,15 @@ export default function App() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showCharacterPanel, setShowCharacterPanel] = useState(false);
   const [showDiceRoller, setShowDiceRoller] = useState(true);
+  const [showSupabaseSetup, setShowSupabaseSetup] = useState(false);
 
   // Game Realtime States
   const [lastRoll, setLastRoll] = useState(null);
   const [isRolling, setIsRolling] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
 
-  const activeChannelRef = useRef(null);
+  const channelRef = useRef(null);
+  const supabaseReady = getIsSupabaseConfigured();
 
   // Save account changes both to state & localStorage
   const updateAccountProfile = (updatedData) => {
@@ -90,84 +92,42 @@ export default function App() {
     }
   };
 
-  // Helper to sync room update to all connected peers
+  // Broadcast room state to all peers in the channel
   const broadcastRoomUpdate = (updatedRoom) => {
     setRoom(updatedRoom);
-    if (activeChannelRef.current) {
-      activeChannelRef.current.send({
-        type: 'broadcast',
-        event: 'room_updated',
-        payload: updatedRoom
-      });
-    }
-    if (localBroadcast) {
-      localBroadcast.postMessage({ type: 'room_updated', payload: updatedRoom });
+    if (channelRef.current) {
+      channelRef.current.send('room_updated', updatedRoom);
     }
   };
 
-  // Helper to sync dice roll to all peers
+  // Broadcast dice roll to all peers
   const broadcastDiceRoll = (rollData) => {
     setLastRoll(rollData);
     setIsRolling(true);
     setTimeout(() => setIsRolling(false), 1800);
-
-    if (activeChannelRef.current) {
-      activeChannelRef.current.send({
-        type: 'broadcast',
-        event: 'dice_rolled',
-        payload: rollData
-      });
-    }
-    if (localBroadcast) {
-      localBroadcast.postMessage({ type: 'dice_rolled', payload: rollData });
+    if (channelRef.current) {
+      channelRef.current.send('dice_rolled', rollData);
     }
   };
 
-  // Setup Realtime Sync Channel when joining a room
+  // Connect to room channel and subscribe to events
   const joinRealtimeRoom = (roomCode, player) => {
-    const channelName = `dnd_room_${roomCode}`;
-    const channel = supabase.channel(channelName, {
-      config: { broadcast: { self: true }, presence: { key: player.id } }
+    if (channelRef.current) channelRef.current.destroy();
+    const ch = joinRoom(roomCode, player.id);
+    ch.on('room_updated', (payload) => {
+      setRoom(payload);
+      const me = payload?.players?.find(p => p.id === player.id);
+      if (me) setCurrentPlayer(me);
     });
-
-    channel
-      .on('broadcast', { event: 'room_updated' }, ({ payload }) => {
-        setRoom(payload);
-        const me = payload.players.find(p => p.id === player.id);
-        if (me) setCurrentPlayer(me);
-      })
-      .on('broadcast', { event: 'dice_rolled' }, ({ payload }) => {
-        setLastRoll(payload);
-        setIsRolling(true);
-        setTimeout(() => setIsRolling(false), 1800);
-      })
-      .on('broadcast', { event: 'ai_thinking' }, ({ payload }) => {
-        setIsAiThinking(payload);
-      })
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          channel.track({
-            id: player.id,
-            nickname: player.nickname,
-            avatar: player.avatar,
-            onlineAt: new Date().toISOString()
-          });
-        }
-      });
-
-    activeChannelRef.current = channel;
-
-    if (localBroadcast) {
-      localBroadcast.onmessage = (msg) => {
-        if (msg.data.type === 'room_updated') {
-          setRoom(msg.data.payload);
-        } else if (msg.data.type === 'dice_rolled') {
-          setLastRoll(msg.data.payload);
-          setIsRolling(true);
-          setTimeout(() => setIsRolling(false), 1800);
-        }
-      };
-    }
+    ch.on('dice_rolled', (payload) => {
+      setLastRoll(payload);
+      setIsRolling(true);
+      setTimeout(() => setIsRolling(false), 1800);
+    });
+    ch.on('ai_thinking', (payload) => {
+      setIsAiThinking(!!payload);
+    });
+    channelRef.current = ch;
   };
 
   // Create Lobby Handler
@@ -325,8 +285,8 @@ export default function App() {
     broadcastRoomUpdate(updatedRoom);
 
     setIsAiThinking(true);
-    if (activeChannelRef.current) {
-      activeChannelRef.current.send({ type: 'broadcast', event: 'ai_thinking', payload: true });
+    if (channelRef.current) {
+      channelRef.current.send('ai_thinking', true);
     }
 
     try {
@@ -351,8 +311,8 @@ export default function App() {
       console.error("AI DM error:", e);
     } finally {
       setIsAiThinking(false);
-      if (activeChannelRef.current) {
-        activeChannelRef.current.send({ type: 'broadcast', event: 'ai_thinking', payload: false });
+      if (channelRef.current) {
+        channelRef.current.send('ai_thinking', false);
       }
       broadcastRoomUpdate(updatedRoom);
     }
@@ -427,6 +387,26 @@ export default function App() {
           onUpdateHp={(newHp) => updateAccountProfile({ hp: newHp })}
           onClose={() => setShowCharacterPanel(false)}
         />
+      )}
+
+      {showSupabaseSetup && (
+        <SupabaseSetup
+          isConfigured={supabaseReady}
+          onSave={(url, key) => saveSupabaseCredentials(url, key)}
+          onClose={() => setShowSupabaseSetup(false)}
+        />
+      )}
+
+      {/* Supabase setup nudge if not configured */}
+      {!supabaseReady && !room && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50">
+          <button
+            onClick={() => setShowSupabaseSetup(true)}
+            className="px-4 py-2 rounded-xl bg-amber-600/90 hover:bg-amber-500 text-slate-950 text-xs font-bold shadow-lg flex items-center gap-2 animate-pulse"
+          >
+            ⚠️ Настроить мультиплеер (Supabase) — кенты не видят друг друга!
+          </button>
+        </div>
       )}
     </div>
   );
