@@ -16,10 +16,10 @@ function playDiceRollSound() {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = i % 2 === 0 ? 'triangle' : 'sine';
-      osc.frequency.setValueAtTime(200 + Math.random() * 380, ctx.currentTime + i * 0.06);
+      osc.frequency.setValueAtTime(220 + Math.random() * 400, ctx.currentTime + i * 0.06);
 
       gain.gain.setValueAtTime(0.4, ctx.currentTime + i * 0.06);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.06 + 0.07);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.06 + 0.06);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
@@ -32,14 +32,13 @@ function playDiceRollSound() {
   }
 }
 
-// Generate number textures for faces
+// Generate number textures for 3D polyhedron faces
 function createFaceTexture(number, isNat20 = false, isNat1 = false) {
   const canvas = document.createElement('canvas');
   canvas.width = 256;
   canvas.height = 256;
   const ctx = canvas.getContext('2d');
 
-  // Background gradient
   const grad = ctx.createLinearGradient(0, 0, 256, 256);
   if (isNat20) {
     grad.addColorStop(0, '#f59e0b');
@@ -57,12 +56,10 @@ function createFaceTexture(number, isNat20 = false, isNat1 = false) {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 256, 256);
 
-  // Gold border
   ctx.strokeStyle = isNat20 ? '#fef08a' : isNat1 ? '#f87171' : '#f59e0b';
   ctx.lineWidth = 12;
   ctx.strokeRect(10, 10, 236, 236);
 
-  // Number text
   ctx.font = 'bold 120px Cinzel, serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -89,26 +86,67 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
   const computedStatMod = Math.floor(((stats[selectedStat] || 10) - 10) / 2);
   const totalModifier = computedStatMod + Number(customMod || 0);
 
+  // Trigger 3D Spin Animation Physics
+  const trigger3DSpinAnimation = () => {
+    playDiceRollSound();
+
+    const mesh = diceMeshRef.current;
+    if (!mesh) return;
+
+    const startX = mesh.rotation.x;
+    const startY = mesh.rotation.y;
+    const startZ = mesh.rotation.z;
+
+    const targetRotX = startX + Math.PI * 10 + (Math.random() * Math.PI);
+    const targetRotY = startY + Math.PI * 12 + (Math.random() * Math.PI);
+    const targetRotZ = startZ + Math.PI * 8 + (Math.random() * Math.PI);
+
+    const startTime = performance.now();
+    const duration = 1800;
+
+    const rollStep = (now) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(1, elapsed / duration);
+      const ease = 1 - Math.pow(1 - progress, 3);
+
+      mesh.rotation.x = startX + (targetRotX - startX) * ease;
+      mesh.rotation.y = startY + (targetRotY - startY) * ease;
+      mesh.rotation.z = startZ + (targetRotZ - startZ) * ease;
+
+      if (progress < 0.95) {
+        setDisplayNumber(Math.floor(Math.random() * 20) + 1);
+      }
+
+      if (progress < 1) {
+        requestAnimationFrame(rollStep);
+      } else {
+        setLocalRolling(false);
+      }
+    };
+
+    requestAnimationFrame(rollStep);
+  };
+
   // Setup Three.js WebGL Scene
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const width = container.clientWidth || 220;
+    const width = 240;
     const height = 220;
 
-    // Scene, Camera, Renderer
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-    camera.position.z = 4.8;
+    camera.position.z = 4.6;
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    container.innerHTML = '';
     container.appendChild(renderer.domElement);
 
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0xfff5ea, 1.2);
+    const ambientLight = new THREE.AmbientLight(0xfff5ea, 1.4);
     scene.add(ambientLight);
 
     const dirLight1 = new THREE.DirectionalLight(0xf59e0b, 2.5);
@@ -119,22 +157,15 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
     dirLight2.position.set(-5, -5, 3);
     scene.add(dirLight2);
 
-    const pointLight = new THREE.PointLight(0xf59e0b, 2, 10);
-    pointLight.position.set(0, 0, 3);
-    scene.add(pointLight);
-
-    // Icosahedron Geometry (20 Faces)
     const geometry = new THREE.IcosahedronGeometry(1.4, 0);
 
-    // Create 20 distinct face materials with numbers 1..20
     const materials = [];
     for (let i = 1; i <= 20; i++) {
       materials.push(
         new THREE.MeshStandardMaterial({
           map: createFaceTexture(i),
-          roughness: 0.3,
-          metalness: 0.75,
-          bumpScale: 0.05
+          roughness: 0.25,
+          metalness: 0.8
         })
       );
     }
@@ -143,14 +174,13 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
     scene.add(mesh);
     diceMeshRef.current = mesh;
 
-    // Animation Render Loop
-    let rotationSpeedX = 0.005;
-    let rotationSpeedY = 0.008;
+    let rotationSpeedX = 0.006;
+    let rotationSpeedY = 0.009;
 
     const animate = () => {
       animFrameRef.current = requestAnimationFrame(animate);
 
-      if (mesh) {
+      if (mesh && !localRolling && !isRolling) {
         mesh.rotation.x += rotationSpeedX;
         mesh.rotation.y += rotationSpeedY;
       }
@@ -168,63 +198,31 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
     };
   }, []);
 
+  // Watch for external rolls or clicks to trigger 3D animation
+  useEffect(() => {
+    if (isRolling || lastRoll) {
+      trigger3DSpinAnimation();
+    }
+  }, [lastRoll]);
+
   const handleRollClick = () => {
     if (isRolling || localRolling) return;
-
-    setLocalRolling(false);
     setLocalRolling(true);
-    playDiceRollSound();
+    trigger3DSpinAnimation();
 
-    const mesh = diceMeshRef.current;
-    if (!mesh) return;
-
-    // Fast 3D Tumbling Physics Spin
-    let startX = mesh.rotation.x;
-    let startY = mesh.rotation.y;
-    let startZ = mesh.rotation.z;
-
-    const targetRotX = startX + Math.PI * 8 + (Math.random() * Math.PI);
-    const targetRotY = startY + Math.PI * 10 + (Math.random() * Math.PI);
-    const targetRotZ = startZ + Math.PI * 6 + (Math.random() * Math.PI);
-
-    const startTime = performance.now();
-    const duration = 1800;
-
-    const rollStep = (now) => {
-      const elapsed = now - startTime;
-      const progress = Math.min(1, elapsed / duration);
-      // Ease out cubic
-      const ease = 1 - Math.pow(1 - progress, 3);
-
-      mesh.rotation.x = startX + (targetRotX - startX) * ease;
-      mesh.rotation.y = startY + (targetRotY - startY) * ease;
-      mesh.rotation.z = startZ + (targetRotZ - startZ) * ease;
-
-      // Rapid number flicker on screen
-      if (progress < 0.95) {
-        setDisplayNumber(Math.floor(Math.random() * 20) + 1);
-      }
-
-      if (progress < 1) {
-        requestAnimationFrame(rollStep);
-      } else {
-        setLocalRolling(false);
-        const statNameMap = {
-          str: 'Сила (STR)',
-          dex: 'Ловкость (DEX)',
-          con: 'Телосложение (CON)',
-          int: 'Интеллект (INT)',
-          wis: 'Мудрость (WIS)',
-          cha: 'Харизма (CHA)'
-        };
-        onRoll({
-          modifier: totalModifier,
-          statName: statNameMap[selectedStat] || 'D20 Check'
-        });
-      }
+    const statNameMap = {
+      str: 'Сила (STR)',
+      dex: 'Ловкость (DEX)',
+      con: 'Телосложение (CON)',
+      int: 'Интеллект (INT)',
+      wis: 'Мудрость (WIS)',
+      cha: 'Харизма (CHA)'
     };
 
-    requestAnimationFrame(rollStep);
+    onRoll({
+      modifier: totalModifier,
+      statName: statNameMap[selectedStat] || 'D20 Check'
+    });
   };
 
   useEffect(() => {
@@ -244,18 +242,18 @@ export default function D20Dice({ onRoll, lastRoll, isRolling, stats = {} }) {
       <div className="flex items-center justify-between border-b border-amber-500/20 pb-3 mb-2">
         <div className="flex items-center gap-2">
           <Dice5 className="w-5 h-5 text-amber-400" />
-          <h3 className="font-cinzel text-sm font-bold text-amber-300">Настоящий 3D D20 Кубик (Three.js)</h3>
+          <h3 className="font-cinzel text-sm font-bold text-amber-300">Настоящий 3D D20 Кубик (Three.js WebGL)</h3>
         </div>
         <span className="text-[10px] text-amber-400/80 font-mono">3D Икосаэдр</span>
       </div>
 
       {/* Three.js WebGL 3D Canvas Container */}
       <div className="my-2 relative flex flex-col items-center cursor-pointer select-none" onClick={handleRollClick}>
-        <div ref={containerRef} className="w-full h-[210px] flex items-center justify-center"></div>
+        <div ref={containerRef} className="w-[240px] h-[220px] flex items-center justify-center mx-auto"></div>
 
         {/* Live Roll Value Overlay Badge */}
         <div className="absolute bottom-2 bg-slate-950/90 px-4 py-1 rounded-full border border-amber-500/50 shadow-lg">
-          <span className="text-xs text-slate-400 font-mono">Результат: </span>
+          <span className="text-xs text-slate-400 font-mono">Выпало: </span>
           <strong className="text-base font-cinzel text-yellow-300 font-bold">
             {rollingState ? displayNumber : lastRoll ? lastRoll.rawRoll : 20}
           </strong>
